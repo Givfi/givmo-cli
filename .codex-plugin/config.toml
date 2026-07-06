@@ -1,0 +1,13 @@
+# Givmo MCP server — OpenAI Codex CLI configuration snippet.
+#
+# Codex has no plugin-marketplace or plugin-manifest mechanism: MCP servers are
+# configured in ~/.codex/config.toml. Merge the table below into your existing
+# ~/.codex/config.toml (do not overwrite the whole file). See README.md in this
+# directory for step-by-step instructions.
+#
+# This registers the remote Givmo MCP server over streamable HTTP. No secrets
+# live here — the Givmo tools are consumer-scoped and authenticate through
+# Givmo's own linking/consent flow, not a token pasted into this file.
+
+[mcp_servers.givmo]
+url = "https://mcp.givmo.io/mcp"

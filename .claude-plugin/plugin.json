@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "givmo",
+  "displayName": "Givmo Giving",
+  "version": "0.1.0",
+  "description": "Search real charities, read your own linked Givmo giving, and start a donation that you complete in a secretless human checkout. The agent never moves money — it hands off a checkout link.",
+  "author": {
+    "name": "Givmo",
+    "url": "https://givmo.io"
+  },
+  "homepage": "https://givmo.io",
+  "repository": "https://github.com/givfi/givmo-cli",
+  "license": "Apache-2.0",
+  "keywords": [
+    "charity",
+    "charitable-giving",
+    "donation",
+    "nonprofit",
+    "mcp",
+    "givmo"
+  ],
+  "mcpServers": {
+    "givmo": {
+      "type": "http",
+      "url": "https://mcp.givmo.io/mcp"
+    }
+  }
+}

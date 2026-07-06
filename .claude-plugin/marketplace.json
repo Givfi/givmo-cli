@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "givmo",
+  "description": "Givmo's charitable-giving tools for coding agents: charity search, linked giving history, and human-completed donation checkout.",
+  "owner": {
+    "name": "Givmo",
+    "email": "support@givmocharitable.org"
+  },
+  "plugins": [
+    {
+      "name": "givmo",
+      "source": "./",
+      "description": "Search real charities, read your own linked Givmo giving, and start a donation you complete in a secretless human checkout. The agent never moves money — it hands off a checkout link.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Givmo"
+      },
+      "homepage": "https://givmo.io",
+      "repository": "https://github.com/givfi/givmo-cli",
+      "license": "Apache-2.0",
+      "category": "productivity",
+      "keywords": [
+        "charity",
+        "charitable-giving",
+        "donation",
+        "nonprofit",
+        "mcp"
+      ],
+      "skills": [
+        "./skills/givmo-giving"
+      ]
+    }
+  ]
+}
