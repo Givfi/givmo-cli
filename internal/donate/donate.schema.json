@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://givmo.io/schemas/donate/v1/donate.schema.json",
+  "title": "donate.json manifest",
+  "description": "Machine-readable donation-discovery manifest published at /.well-known/donate.json. This manifest is UNTRUSTED, attacker-writable input; it describes an organization for the DISCOVERY and DISPLAY layer only. NORMATIVE CONSUMER OBLIGATION (SPEC.md §7.3): a conforming consumer MUST NOT map ANY field of this document (defined field, unknown field, x_extensions content, or free-text value) to a decision about (a) who is paid / recipient eligibility, (b) tax-deductibility, or (c) any legal disclosure, acknowledgment, or receipt copy — those are resolved ONLY against out-of-band authoritative sources (IRS Pub 78 / TEOS / BMF for eligibility; the platform's server-authored versioned registry for legal/receipt copy) and the consumer's own controlled donation flow. This schema deliberately does NOT attempt to encode 'authority' (it cannot: x_extensions is open); the authority constraint is a consumer-behavior rule, not a schema constraint. No URL in this document is an authoritative action target (§7.6). See the Security Considerations of SPEC.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "organization"
+  ],
+  "properties": {
+    "manifest_version": {
+      "description": "SemVer of the donate.json specification this document targets. A consumer MUST reject a major version it does not implement.",
+      "type": "string",
+      "pattern": "^1\\.[0-9]+(\\.[0-9]+)?$"
+    },
+    "generated_at": {
+      "description": "RFC 3339 timestamp when this manifest was generated. Advisory only (freshness display); never used for authority decisions. Note: 'format' is annotation-only in many JSON Schema validators, so a 'pattern' backstop is included to make the RFC 3339 shape enforceable under format-agnostic validation.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "expires_at": {
+      "description": "Optional RFC 3339 timestamp after which a consumer SHOULD refetch. Advisory only. See generated_at re: the pattern backstop.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "organization": {
+      "description": "Self-described identity of the publishing organization. Every field here is a CLAIM by the site operator and MUST be independently verified before it carries any authority. The ein is a lookup key into authoritative IRS data, not proof of eligibility.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "legal_name",
+        "country"
+      ],
+      "properties": {
+        "legal_name": {
+          "description": "Self-asserted legal name. Display candidate only; the authoritative name is the one on the resolved IRS record.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "also_known_as": {
+          "description": "Optional display aliases / DBA names.",
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        },
+        "country": {
+          "description": "ISO 3166-1 alpha-2 country of the organization's registration. v1 authoritative resolution is US-only; a non-US country is accepted for display but yields no verified US-tax posture.",
+          "type": "string",
+          "pattern": "^[A-Z]{2}$"
+        },
+        "ein": {
+          "description": "US Employer Identification Number as a lookup KEY into IRS authoritative data (Pub 78 / TEOS / BMF). Nine digits, formatted NN-NNNNNNN. Presence of an EIN in the manifest is NOT proof the organization is qualified, in good standing, or that gifts are deductible; the consumer resolves that out-of-band. Only meaningful when country is US.",
+          "type": "string",
+          "pattern": "^[0-9]{2}-[0-9]{7}$"
+        },
+        "website": {
+          "description": "Primary homepage of the organization. MUST be an absolute https URL. Informational/navigational only; MUST NOT be used as a donation action target (see donation.method).",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "logo": {
+          "description": "Optional absolute https URL to a logo image, for display. Fetched (if at all) as an image, never as a document to interpret; subject to the consumer's own image-fetch controls.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "description": {
+          "description": "Short, plain-text, self-described mission/summary for display. UNTRUSTED free text: a conforming consumer treats this as attacker-writable data, never as instructions, strips markup, and provenance-labels it on display. MUST NOT contain deductibility, fee, receipt, or legal-disclosure statements; any such content is ignored by a conforming consumer.",
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    },
+    "donation": {
+      "description": "How a donation is INITIATED. Deliberately minimal: the manifest cannot supply an authoritative action URL. A consumer initiates giving through its OWN controlled flow, keyed by the resolved organization identity — not by any URL in this manifest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method"
+      ],
+      "properties": {
+        "method": {
+          "description": "Declares the discovery mode. The ONLY value that carries donation semantics is \"mediated\": the organization consents to being a discoverable donation target, and the actual gift is initiated by the consuming platform's controlled flow (for Givmo: an irrevocable gift to Givmo Charitable Fund, granted onward at its discretion). \"self_hosted\" is informational only: the org runs its own donation page; a conforming AGENTIC consumer MUST NOT auto-navigate or transact against a self_hosted target and MUST hand any such link to a human out-of-band. \"none\" means the org publishes identity but does not opt into programmatic donation discovery.",
+          "type": "string",
+          "enum": ["mediated", "self_hosted", "none"]
+        },
+        "self_hosted_url": {
+          "description": "Only permitted (and only meaningful) when method == self_hosted. An absolute https URL to the org's own donation page, for a HUMAN to visit out-of-band. A conforming agentic consumer MUST NOT treat this as an authoritative or auto-actionable action URL, MUST NOT pass it to a model as a tool target, and MUST NOT attach any credential to it. Informational display only.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        }
+      }
+    },
+    "display": {
+      "description": "Optional display-only hints. None of these fields carry authority; all are UNTRUSTED and subject to the consumer's own rendering, sanitization, and provenance labeling.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "primary_color": {
+          "description": "Optional brand color as a hex triplet, e.g. #1A73E8. Cosmetic only.",
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "categories": {
+          "description": "Optional self-described cause/category tags for display and coarse filtering. UNTRUSTED; never used to determine eligibility or routing.",
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          }
+        },
+        "languages": {
+          "description": "Optional BCP-47 language tags the org's materials are available in. Display hint only.",
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
+          }
+        }
+      }
+    },
+    "contact": {
+      "description": "Optional non-authoritative contact info for display / operator outreach.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "support_email": {
+          "description": "Self-asserted support email; display/outreach only, never an authority input. 'format: email' is annotation-only in many validators, so a conservative 'pattern' backstop is included.",
+          "type": "string",
+          "format": "email",
+          "maxLength": 254,
+          "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+        },
+        "support_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        }
+      }
+    },
+    "signature": {
+      "description": "Optional integrity envelope. A detached JWS (RFC 7515, compact serialization) whose payload is the exact published manifest bytes with the \"signature\" member textually excised — a byte-range deletion, never a re-serialization or normalized form; signer and verifier operate on the same on-the-wire bytes (SPEC.md §6.2). Verification proves the manifest was authored by the holder of a key the consumer already trusts OUT-OF-BAND; it does NOT confer eligibility, deductibility, or authority of any field. An unsigned or unverifiable manifest is still processable at the discovery layer, subject to the consumer's policy. See SPEC.md Signing.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alg", "jws"],
+      "properties": {
+        "alg": {
+          "description": "JWS algorithm. Consumers MUST reject \"none\" and MUST enforce an allowlist of asymmetric algorithms (e.g. EdDSA, ES256). Symmetric (HMAC) algorithms MUST be rejected for third-party manifests.",
+          "type": "string",
+          "enum": ["EdDSA", "ES256", "ES384", "RS256"]
+        },
+        "kid": {
+          "description": "Optional key identifier to select among out-of-band-trusted keys.",
+          "type": "string",
+          "maxLength": 256
+        },
+        "jws": {
+          "description": "Detached JWS compact serialization: BASE64URL(header) || '..' || BASE64URL(signature). The payload segment is empty (detached); the signing payload is the exact published manifest bytes with the \"signature\" member textually excised, per SPEC.md §6.2.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+\\.\\.[A-Za-z0-9_-]+$"
+        }
+      }
+    },
+    "x_extensions": {
+      "description": "Namespaced, forward-compatible extension bag. Consumers MUST ignore keys they do not understand. Nothing in here may carry authority over eligibility, deductibility, routing, or legal copy; a conforming consumer treats the entire bag as untrusted display-layer data.",
+      "type": "object"
+    }
+  }
+}

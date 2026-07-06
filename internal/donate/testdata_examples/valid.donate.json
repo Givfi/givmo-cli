@@ -1,0 +1,26 @@
+{
+  "manifest_version": "1.0",
+  "generated_at": "2026-07-02T18:00:00Z",
+  "expires_at": "2026-08-02T18:00:00Z",
+  "organization": {
+    "legal_name": "Example Relief Foundation",
+    "also_known_as": ["Example Relief", "ERF"],
+    "country": "US",
+    "ein": "12-3456789",
+    "website": "https://example-relief.org",
+    "logo": "https://example-relief.org/assets/logo.png",
+    "description": "Example Relief Foundation funds clean-water infrastructure in underserved communities. We build wells and train local maintenance teams."
+  },
+  "donation": {
+    "method": "mediated"
+  },
+  "display": {
+    "primary_color": "#1A73E8",
+    "categories": ["clean water", "international development"],
+    "languages": ["en", "es"]
+  },
+  "contact": {
+    "support_email": "hello@example-relief.org",
+    "support_url": "https://example-relief.org/support"
+  }
+}
