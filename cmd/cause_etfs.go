@@ -4,19 +4,42 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/givfi/givmo-cli/internal/client"
-	"github.com/givfi/givmo-cli/internal/output"
 	"github.com/spf13/cobra"
+
+	"github.com/givfi/givmo-cli/internal/output"
 )
 
-// causeETF is the CLI's display view of a Cause ETF (a curated bundle of
-// charities donated to as one basket).
-type causeETF struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Category    string   `json:"category,omitempty"`
-	Charities   []string `json:"charities,omitempty"`
+// causeETFListItem is one entry from the list_cause_etfs tool (charity_count is a
+// count, not the constituent list — get one ETF to see its charities).
+type causeETFListItem struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	CharityCount int    `json:"charity_count"`
+}
+
+// causeETFListResult is the list_cause_etfs tool payload.
+type causeETFListResult struct {
+	CauseETFs []causeETFListItem `json:"cause_etfs"`
+}
+
+// causeETFConstituent is one charity inside an ETF (get_cause_etf).
+type causeETFConstituent struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// causeETFDetail is the cause_etf object from the get_cause_etf tool.
+type causeETFDetail struct {
+	ID          string                `json:"id"`
+	Name        string                `json:"name"`
+	Description string                `json:"description,omitempty"`
+	Charities   []causeETFConstituent `json:"charities"`
+}
+
+// causeETFDetailResult is the get_cause_etf tool payload.
+type causeETFDetailResult struct {
+	CauseETF causeETFDetail `json:"cause_etf"`
 }
 
 func newCauseETFsCmd() *cobra.Command {
@@ -24,7 +47,7 @@ func newCauseETFsCmd() *cobra.Command {
 		Use:     "cause-etfs",
 		Aliases: []string{"cause-etf", "etfs"},
 		Short:   "List and inspect Cause ETFs (curated charity baskets)",
-		Long:    `List the Givmo Cause ETFs and fetch one by id. Public-tier data; no login required.`,
+		Long:    `List the Givmo Cause ETFs and fetch one by id. Public-tier catalog data served by the list_cause_etfs / get_cause_etf MCP tools; no login required.`,
 	}
 	cmd.AddCommand(newCauseETFsListCmd(), newCauseETFsGetCmd())
 	return cmd
@@ -43,24 +66,24 @@ func newCauseETFsListCmd() *cobra.Command {
 			ctx, cancel := baseContext()
 			defer cancel()
 
-			resp, err := app.apiClient().Do(ctx, "GET", client.PathCauseETFs, nil, false)
+			payload, err := app.callTool(ctx, "list_cause_etfs", map[string]any{}, false, "")
 			if err != nil {
 				return err
 			}
-			var list []causeETF
-			if err := resp.DecodeInto(&list); err != nil {
-				return err
+			var res causeETFListResult
+			if uerr := decodeToolPayload(payload, &res); uerr != nil {
+				return uerr
 			}
-			return app.Printer.Result(list, func(w io.Writer) {
-				if len(list) == 0 {
+			return app.Printer.Result(res, func(w io.Writer) {
+				if len(res.CauseETFs) == 0 {
 					fmt.Fprintln(w, "no cause ETFs found")
 					return
 				}
-				rows := make([][]string, 0, len(list))
-				for _, e := range list {
-					rows = append(rows, []string{e.ID, e.Name, e.Category, fmt.Sprintf("%d", len(e.Charities))})
+				rows := make([][]string, 0, len(res.CauseETFs))
+				for _, e := range res.CauseETFs {
+					rows = append(rows, []string{e.ID, e.Name, fmt.Sprintf("%d", e.CharityCount)})
 				}
-				output.Table(w, []string{"ID", "NAME", "CATEGORY", "#CHARITIES"}, rows)
+				output.Table(w, []string{"ID", "NAME", "#CHARITIES"}, rows)
 			})
 		},
 	}
@@ -69,7 +92,7 @@ func newCauseETFsListCmd() *cobra.Command {
 func newCauseETFsGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <id>",
-		Short: "Fetch a single Cause ETF by id",
+		Short: "Fetch a single Cause ETF by id, including its charities",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			app, err := resolveAppCtx()
@@ -79,22 +102,30 @@ func newCauseETFsGetCmd() *cobra.Command {
 			ctx, cancel := baseContext()
 			defer cancel()
 
-			resp, err := app.apiClient().Do(ctx, "GET", client.ResourcePath(client.PathCauseETFs, args[0]), nil, false)
+			payload, err := app.callTool(ctx, "get_cause_etf", map[string]any{"etf_id": args[0]}, false, "")
 			if err != nil {
 				return err
 			}
-			var e causeETF
-			if err := resp.DecodeInto(&e); err != nil {
-				return err
+			var res causeETFDetailResult
+			if uerr := decodeToolPayload(payload, &res); uerr != nil {
+				return uerr
 			}
-			return app.Printer.Result(e, func(w io.Writer) {
+			e := res.CauseETF
+			return app.Printer.Result(res, func(w io.Writer) {
 				output.KeyValues(w, [][2]string{
 					{"id", e.ID},
 					{"name", e.Name},
-					{"category", e.Category},
 					{"description", e.Description},
 					{"charities", fmt.Sprintf("%d charities", len(e.Charities))},
 				})
+				if len(e.Charities) > 0 {
+					fmt.Fprintln(w)
+					rows := make([][]string, 0, len(e.Charities))
+					for _, c := range e.Charities {
+						rows = append(rows, []string{c.ID, c.Name})
+					}
+					output.Table(w, []string{"CHARITY_ID", "NAME"}, rows)
+				}
 			})
 		},
 	}

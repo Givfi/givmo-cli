@@ -6,9 +6,8 @@
 //  2. the on-disk config file (~/.givmo/config.json)
 //  3. built-in defaults per profile
 //
-// The API/auth base URLs are configurable so the CLI is "ready-inert": the
-// production endpoints (mcp.givmo.io / api.givmo.io) are not all live yet, and
-// pointing a profile at a dev host must not require a recompile.
+// The API/auth base URLs are configurable per profile so pointing a profile at a
+// dev host (or a not-yet-enabled production endpoint) never requires a recompile.
 package config
 
 import (

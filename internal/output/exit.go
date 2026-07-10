@@ -25,7 +25,7 @@ const (
 	// ExitRateLimited — the server throttled the request (HTTP 429).
 	ExitRateLimited = 5
 	// ExitNetwork — a transport-level failure (DNS, connection refused,
-	// timeout) or an endpoint that is not yet live (ready-inert).
+	// timeout) or an endpoint not enabled in the active environment.
 	ExitNetwork = 6
 	// ExitValidation — input failed validation, or an untrusted donate.json
 	// manifest was rejected/sanitized with claims dropped.

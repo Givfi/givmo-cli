@@ -65,7 +65,7 @@ func (r *HTTPRemote) Forward(ctx context.Context, method string, params json.Raw
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
 		return nil, &rpcError{Code: codeInternalError, Message: "remote MCP unreachable: " + err.Error() +
-			" (the mcp.givmo.io endpoint may not be live yet — ready-inert)"}
+			" (the /mcp endpoint may not be reachable or enabled in this environment)"}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))

@@ -1,10 +1,52 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/givfi/givmo-cli/internal/auth"
 	"github.com/givfi/givmo-cli/internal/output"
 )
+
+// failingDiscoverer fails both discovery calls, forcing the conventional-endpoint
+// fallback path in discoverAuthServer.
+type failingDiscoverer struct{}
+
+func (failingDiscoverer) ProtectedResource(context.Context, string) (*auth.ProtectedResourceMetadata, error) {
+	return nil, errors.New("discovery down")
+}
+
+func (failingDiscoverer) AuthServer(context.Context, string) (*auth.AuthServerMetadata, error) {
+	return nil, errors.New("discovery down")
+}
+
+func TestFallbackAuthServerMetadata_ConnectPaths(t *testing.T) {
+	md := fallbackAuthServerMetadata("https://api-dev.givmo.io/")
+	if md.AuthorizationEndpoint != "https://api-dev.givmo.io/connect/oauth/authorize" {
+		t.Errorf("authorize endpoint = %q", md.AuthorizationEndpoint)
+	}
+	if md.TokenEndpoint != "https://api-dev.givmo.io/connect/oauth/token" {
+		t.Errorf("token endpoint = %q", md.TokenEndpoint)
+	}
+	if md.Issuer != "https://api-dev.givmo.io" {
+		t.Errorf("issuer = %q", md.Issuer)
+	}
+}
+
+func TestDiscoverAuthServer_FallsBackToConnectPaths(t *testing.T) {
+	md, err := discoverAuthServer(context.Background(), failingDiscoverer{},
+		"https://mcp-dev.givmo.io", "https://api-dev.givmo.io", true)
+	if err != nil {
+		t.Fatalf("discoverAuthServer: %v", err)
+	}
+	if md.AuthorizationEndpoint != "https://api-dev.givmo.io/connect/oauth/authorize" {
+		t.Errorf("fallback authorize = %q", md.AuthorizationEndpoint)
+	}
+	if md.TokenEndpoint != "https://api-dev.givmo.io/connect/oauth/token" {
+		t.Errorf("fallback token = %q", md.TokenEndpoint)
+	}
+}
 
 func TestValidateAuthServerURL_SchemeGuard(t *testing.T) {
 	cases := []struct {

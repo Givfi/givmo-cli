@@ -46,7 +46,7 @@ STABLE EXIT CODES (scripts/agents can branch on these):
   3  auth required/failed        -> run 'givmo login'
   4  not found
   5  rate limited
-  6  network error / endpoint not live (ready-inert)
+  6  network error / endpoint not enabled
   7  validation / rejected manifest
 
 ERROR ENVELOPE: with --json, errors render as
