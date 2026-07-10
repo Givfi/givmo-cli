@@ -8,7 +8,9 @@
 //     request_id} }` (deliberately different envelopes on the two surfaces),
 //   - server request_id extraction (X-Request-Id header, or body request_id /
 //     meta.request_id / error.request_id),
-//   - the paginated `{ "data": ..., "meta": ... }` envelope unwrap.
+//   - the paginated list-envelope unwrap: the root app's `{ "data": ..., "meta": ... }`
+//     and the Connect mount's `{ "data": [...], "next_cursor": "…" }` (Connect pages via
+//     a top-level keyset token, surfaced as Response.NextCursor).
 //
 // Nothing here logs tokens; the Authorization header is never printed.
 package client
@@ -76,8 +78,12 @@ type Response struct {
 	// Data is the unwrapped payload (the `data` field if the envelope was
 	// present, else the whole body). Raw JSON for the caller to decode.
 	Data json.RawMessage
-	// Meta is the pagination/meta object when present.
+	// Meta is the pagination/meta object when present (the root app's envelope).
 	Meta json.RawMessage
+	// NextCursor is the Connect mount's keyset-pagination token: Connect list
+	// responses page via a top-level `next_cursor` (`{ "data": [...],
+	// "next_cursor": "…" }`), NOT via `meta`. Empty when absent/last page.
+	NextCursor string
 	// Raw is the full, un-unwrapped response body.
 	Raw json.RawMessage
 }
@@ -138,13 +144,14 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, requi
 		return nil, mapHTTPError(resp.StatusCode, raw, reqID)
 	}
 
-	data, meta := unwrapEnvelope(raw)
+	data, meta, nextCursor := unwrapEnvelope(raw)
 	return &Response{
-		Status:    resp.StatusCode,
-		RequestID: reqID,
-		Data:      data,
-		Meta:      meta,
-		Raw:       json.RawMessage(raw),
+		Status:     resp.StatusCode,
+		RequestID:  reqID,
+		Data:       data,
+		Meta:       meta,
+		NextCursor: nextCursor,
+		Raw:        json.RawMessage(raw),
 	}, nil
 }
 
@@ -200,21 +207,25 @@ func requestIDFrom(resp *http.Response, body []byte) string {
 	return ""
 }
 
-// unwrapEnvelope returns (data, meta) from a `{ "data": ..., "meta": ... }`
-// paginated envelope, or (wholeBody, nil) for a singleton response.
-func unwrapEnvelope(body []byte) (json.RawMessage, json.RawMessage) {
+// unwrapEnvelope returns (data, meta, nextCursor) from a list envelope. The root app
+// serves `{ "data": ..., "meta": ... }`; the Connect mount serves
+// `{ "data": [...], "next_cursor": "…" }` — a TOP-LEVEL keyset token, not nested under
+// `meta` (every Connect list model: app/api/connect/models/*.py). A singleton response
+// (no `data` key) returns (wholeBody, nil, "").
+func unwrapEnvelope(body []byte) (data, meta json.RawMessage, nextCursor string) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return json.RawMessage(body), nil
+		return json.RawMessage(body), nil, ""
 	}
 	var env struct {
-		Data json.RawMessage `json:"data"`
-		Meta json.RawMessage `json:"meta"`
+		Data       json.RawMessage `json:"data"`
+		Meta       json.RawMessage `json:"meta"`
+		NextCursor string          `json:"next_cursor"`
 	}
 	if err := json.Unmarshal(trimmed, &env); err == nil && env.Data != nil {
-		return env.Data, env.Meta
+		return env.Data, env.Meta, env.NextCursor
 	}
-	return json.RawMessage(body), nil
+	return json.RawMessage(body), nil, ""
 }
 
 // mapHTTPError converts an HTTP error status + body into the single envelope

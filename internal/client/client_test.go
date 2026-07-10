@@ -64,6 +64,65 @@ func TestDo_UnwrapsDataEnvelope(t *testing.T) {
 	if len(resp.Meta) == 0 {
 		t.Error("meta should be surfaced")
 	}
+	// The root app pages via `meta`, not the Connect keyset token.
+	if resp.NextCursor != "" {
+		t.Errorf("root {data,meta} envelope must leave NextCursor empty; got %q", resp.NextCursor)
+	}
+}
+
+func TestDo_CapturesConnectNextCursor(t *testing.T) {
+	// The Connect mount pages via a TOP-LEVEL `next_cursor` (not `meta`); the CLI must
+	// surface it so a future Connect-REST command can page. Shape mirrors every Connect
+	// list model (app/api/connect/models/*.py, e.g. ConnectCharityListResponse:
+	// `{ data: [...], next_cursor: "…"|null }`).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[{"id":"ch_1"}],"next_cursor":"eyJvIjoxfQ=="}`))
+	}))
+	defer srv.Close()
+
+	c := New(Options{BaseURL: srv.URL})
+	resp, err := c.Do(context.Background(), "GET", "/connect/charities", nil, false)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.NextCursor != "eyJvIjoxfQ==" {
+		t.Errorf("next_cursor = %q, want the Connect keyset token", resp.NextCursor)
+	}
+	var list []struct {
+		ID string `json:"id"`
+	}
+	if err := resp.DecodeInto(&list); err != nil {
+		t.Fatalf("DecodeInto: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "ch_1" {
+		t.Errorf("data unwrapped wrong: %+v", list)
+	}
+	// A Connect envelope pages via next_cursor, so `meta` is absent.
+	if len(resp.Meta) != 0 {
+		t.Errorf("Connect envelope must not populate meta; got %q", resp.Meta)
+	}
+}
+
+func TestDo_ConnectLastPageNoCursor(t *testing.T) {
+	// Last page: `next_cursor` absent (or null) → NextCursor empty, data still unwrapped.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":[{"id":"ch_9"}],"next_cursor":null}`))
+	}))
+	defer srv.Close()
+
+	c := New(Options{BaseURL: srv.URL})
+	resp, err := c.Do(context.Background(), "GET", "/connect/charities", nil, false)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.NextCursor != "" {
+		t.Errorf("last page must leave NextCursor empty; got %q", resp.NextCursor)
+	}
+	if len(resp.Data) == 0 {
+		t.Error("data should still be unwrapped on the last page")
+	}
 }
 
 func TestDo_SingletonNoEnvelope(t *testing.T) {
