@@ -132,22 +132,83 @@ func mcpTextContent(tr mcpToolResult) string {
 	return ""
 }
 
-// toolErrorFromText maps an isError tool result (a raised dispatch error) to the
-// CLI envelope. A tool_not_found for a consumer tool almost always means the
-// stored grant lacks the tool's scope, so it maps to an auth error.
+// donationRejectionCodes are the stable Connect error codes the create_donation_intent
+// money tool prefixes onto its refusal text as "<code>: <human message>" — the backend
+// renders f"{exc.code}: {exc.message}" (donation_intent_tools.py) for every
+// DonationIntentRejection (connect/donation_intent_service.py). Each is a request/domain refusal
+// the caller self-repairs by CHANGING INPUTS (a different charity, a valid amount) —
+// never by re-authenticating. Classification MUST key on this stable code, not the human
+// wording: charity_inactive's message ("...not available for donations.") would otherwise
+// be misread as an auth failure and send an agent into a re-login loop.
+var donationRejectionCodes = map[string]bool{
+	"invalid_amount":                  true,
+	"currency_not_supported":          true,
+	"contribution_type_not_available": true,
+	"charity_inactive":                true, // covers an inactive charity AND an inactive cause ETF
+	"invalid_email":                   true,
+	"amount_limit_exceeded":           true,
+	"link_token_not_supported":        true,
+	"reserved_metadata_key":           true,
+	"invalid_request":                 true,
+}
+
+// leadingToken returns the maximal leading run of snake_case token characters
+// ([a-z0-9_]) — the stable error code the backend prefixes onto a tool error
+// ("<code>: <message>", or "invalid_arguments for '<tool>': …"). Returns "" when the
+// text does not start with such a token (e.g. a plain human sentence). Pure.
+func leadingToken(text string) string {
+	i := 0
+	for i < len(text) {
+		c := text[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			i++
+			continue
+		}
+		break
+	}
+	return text[:i]
+}
+
+// toolErrorFromText maps an isError tool result (a raised dispatch error or a refused
+// write) to the CLI envelope, keying on the STABLE leading error code the backend
+// renders — never on human message wording. `tool_not_found` is the one genuinely
+// auth-shaped code (a tool the grant's scope/audience does not include is reported
+// identically to one that does not exist at all), so it → ExitAuth. Every
+// donation-intent rejection and `invalid_arguments` is a request/domain refusal the
+// caller fixes by changing inputs → ExitValidation with the server's message.
 func toolErrorFromText(text, name string) *output.Error {
-	if strings.TrimSpace(text) == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		text = "the MCP tool '" + name + "' returned an error"
 	}
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "not found") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown tool") {
+	authError := func() *output.Error {
 		return output.New(output.ExitAuth,
 			"the MCP tool '"+name+"' is not available to this credential: "+text,
 			"Your consumer grant may lack the tool's scope, or the surface is not enabled in this environment. Re-run `givmo login` to (re)authorize.")
 	}
-	return output.New(output.ExitValidation,
-		"the MCP tool '"+name+"' rejected the request: "+text,
-		"Adjust the inputs per the message and retry.")
+	validationError := func() *output.Error {
+		return output.New(output.ExitValidation,
+			"the MCP tool '"+name+"' rejected the request: "+text,
+			"Adjust the request per the message and retry; this is a request/validation problem, not an authentication failure.")
+	}
+
+	switch code := leadingToken(text); {
+	case code == "tool_not_found":
+		return authError()
+	case code == "invalid_arguments" || donationRejectionCodes[code]:
+		return validationError()
+	}
+
+	// No recognized code prefix: fall back to a conservative heuristic for auth-shaped
+	// phrasings from any surface that does not prefix a stable code. Deliberately does
+	// NOT trigger on "not available": the money rail's charity_inactive message
+	// ("...not available for donations.") carries that phrase and is a validation
+	// refusal, not an auth failure.
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "not found") || strings.Contains(lower, "unknown tool") {
+		return authError()
+	}
+	return validationError()
 }
 
 // inbandToolError inspects a successful tool payload for a corrective `error`

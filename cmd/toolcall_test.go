@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/givfi/givmo-cli/internal/auth"
@@ -162,8 +163,12 @@ func TestCallTool_InbandErrorMapsExitCode(t *testing.T) {
 }
 
 func TestCallTool_IsErrorToolNotFoundMapsAuth(t *testing.T) {
+	// The backend's no-leak miss (mcp_exposure.tool_not_found_result): a tool the
+	// caller's audience+scopes don't include is reported identically to a nonexistent
+	// one, prefixed with the stable `tool_not_found` code. This is the ONE genuinely
+	// auth-shaped tool error → ExitAuth.
 	result := map[string]any{
-		"content": textBlock("Tool 'create_donation_intent' is not available to this principal."),
+		"content": textBlock("tool_not_found: no tool named 'create_donation_intent' is available to this caller."),
 		"isError": true,
 	}
 	srv := rpcServer(t, result, nil)
@@ -177,6 +182,57 @@ func TestCallTool_IsErrorToolNotFoundMapsAuth(t *testing.T) {
 	}
 	if got := output.AsError(err).Code; got != output.ExitAuth {
 		t.Errorf("tool_not_found -> exit %d, want ExitAuth (%d)", got, output.ExitAuth)
+	}
+}
+
+// TestCallTool_MoneyRejectionKeysOnCodeNotText pins the money-path defect: a
+// donation-intent rejection is classified on its stable leading `code:` token, NOT the
+// human wording. charity_inactive's message contains "not available", which must never
+// be misread as an auth failure (an agent would loop on re-login instead of picking a
+// live charity). Wire texts are exactly what the backend renders
+// (donation_intent_tools.py f"{exc.code}: {exc.message}").
+func TestCallTool_MoneyRejectionKeysOnCodeNotText(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"charity_inactive", "charity_inactive: The target charity is not available for donations."},
+		{"cause_etf_inactive_reuses_charity_inactive", "charity_inactive: The target cause ETF is not available for donations."},
+		{"invalid_amount", "invalid_amount: Donation must be at least $5.00."},
+		{"amount_limit_exceeded", "amount_limit_exceeded: amount exceeds the per-donation cap."},
+		{"invalid_request", "invalid_request: cause_etf_id is not a valid id."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := map[string]any{
+				"content": textBlock(tc.text),
+				"isError": true,
+			}
+			srv := rpcServer(t, result, nil)
+			defer srv.Close()
+			app := newTestAppCtx(t, srv.URL)
+			t.Setenv("GIVMO_API_KEY", "tok")
+
+			_, err := app.callTool(context.Background(), "create_donation_intent", map[string]any{}, true, "givmo.donation_intents.create")
+			if err == nil {
+				t.Fatal("expected a refused-write tool error")
+			}
+			oe := output.AsError(err)
+			if oe.Code == output.ExitAuth {
+				t.Fatalf("%s must NOT map to ExitAuth (money-path); got the auth exit", tc.name)
+			}
+			if oe.Code != output.ExitValidation {
+				t.Errorf("%s -> exit %d, want ExitValidation (%d)", tc.name, oe.Code, output.ExitValidation)
+			}
+			// The server's real message (the actual cause) must be surfaced verbatim.
+			if !strings.Contains(oe.Message, tc.text) {
+				t.Errorf("message must surface the server text; got %q", oe.Message)
+			}
+			// Remediation must NOT send the caller to re-authenticate.
+			if strings.Contains(strings.ToLower(oe.Remediation), "login") {
+				t.Errorf("remediation must not tell the caller to re-login; got %q", oe.Remediation)
+			}
+		})
 	}
 }
 
