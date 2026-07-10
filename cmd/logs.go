@@ -112,7 +112,7 @@ func newLogsTailCmd() *cobra.Command {
 			resp, derr := app.httpClient().Do(req)
 			if derr != nil {
 				return output.New(output.ExitNetwork, "could not reach the internal logs API: "+derr.Error(),
-					"The internal audit-logs surface may not be live yet (ready-inert).")
+					"Check connectivity and the api_base; the /connect/audit-logs surface may not be enabled in this environment.")
 			}
 			defer resp.Body.Close()
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))

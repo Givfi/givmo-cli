@@ -128,7 +128,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, requi
 		return nil, output.New(output.ExitNetwork,
 			"could not reach the Givmo API: "+err.Error(),
 			"Check connectivity and the active profile's api_base (`givmo config view`). "+
-				"Note: some endpoints are not live yet (ready-inert) and will fail until enabled.")
+				"Note: some endpoints may not be enabled in the active environment and will fail until turned on.")
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))

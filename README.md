@@ -6,20 +6,28 @@ platform's **public** (catalog) and **consumer** (user-delegated OAuth)
 developer tiers.
 
 Givmo exposes one remote MCP server at `https://mcp.givmo.io/mcp` (Streamable
-HTTP, stateless) plus a REST API on the same backend. This CLI is the AI-native
-surface for those tiers: every command is scriptable, every output has a
+HTTP, stateless) plus a partner/internal REST API under `/connect/*` on the same
+backend. The **consumer** catalog, giving, and donation operations are **MCP
+tools** (there is no consumer-scope REST route); this CLI backs those commands
+with the MCP surface and speaks REST only for the partner/internal (`/connect/*`)
+and sandbox surfaces. Every command is scriptable, every output has a
 machine-readable form, and every error is a structured, agent-actionable
 envelope.
 
-> **Ready-inert build.** Several live endpoints (`mcp.givmo.io`, the Connect
-> sandbox, the internal audit-logs API) are not yet enabled in production. The
-> **entire** command surface is implemented, and everything that does **not**
-> require the network — argument parsing, request construction, output
-> formatting, error/exit-code handling, manifest validation & signing, PKCE
-> generation, the MCP stdio framing — is fully unit-tested. Commands that need a
-> live endpoint are structurally complete and fail with a **clear, actionable
-> error** (never a panic) until the endpoint lights up. The API and auth base
-> URLs are configurable per profile so nothing hard-breaks at go-live.
+> **Reconciled to the real backend contract.** The command surface is
+> implemented against the platform's actual contract: the consumer catalog /
+> giving / donation commands call the Givmo MCP tools (`search_charities`,
+> `get_charity_profile`, `list_cause_etfs`, `get_cause_etf`, `get_receipt`,
+> `create_donation_intent`); `logs` reads `GET /connect/audit-logs`; OAuth
+> discovery resolves the Connect authorization server (fallback
+> `/connect/oauth/*`). Everything that does **not** require the network —
+> argument parsing, request/tool-call construction, output formatting,
+> error/exit-code handling, manifest validation & signing, PKCE generation, the
+> MCP stdio framing — is fully unit-tested. Authenticated live behavior against
+> the production hosts (a consumer token's tool set at `/mcp`, the internal
+> audit-log credential, prod DNS/enablement) is verified during go-live QA. The
+> API and auth base URLs are configurable per profile, and any not-yet-enabled
+> endpoint fails with a **clear, actionable error** (never a panic).
 
 ## Install
 
@@ -47,16 +55,18 @@ givmo whoami                 # linked identity + granted scopes (no secrets)
 GIVMO_API_KEY=… givmo login  # stores the key for the active profile
 
 # 3. Explore the catalog (public tier; no login needed).
-givmo charities search "clean water" --state CA --limit 10
-givmo charities get 12-3456789
+givmo charities search "clean water"
+givmo charities search --ein 12-3456789
+givmo charities get ch_abc123          # opaque charity_id from search (EIN also accepted)
 givmo cause-etfs list
+givmo cause-etfs get <etf-id>
 
 # 4. Create a donation — you get a SECRETLESS hosted-checkout URL.
-givmo donation-intents create --charity c_123 --amount 2500 --open
-givmo donation-intents list
+givmo donation-intents create --charity ch_abc123 --amount 2500 --open
+givmo donation-intents create --cause-etf cetf_123 --amount 5000   # donate to a basket
 
-# 5. Receipts.
-givmo receipts list --tax-year 2025
+# 5. Your tax-deductible giving summary for a year.
+givmo receipts summary --tax-year 2025
 
 # 6. Validate / sign a donate.json manifest (UNTRUSTED input).
 givmo manifest validate ./donate.json
@@ -73,10 +83,10 @@ givmo sandbox seed
 givmo mcp install --client claude-code
 givmo mcp serve --tools search_charities,create_donation_intent
 
-# 9. Authenticated escape hatch + spec + audit logs.
-givmo api GET /charities?q=water
-givmo openapi pull --out openapi.json
-givmo logs tail --filter tool=create_donation_intent --filter outcome=denied
+# 9. Authenticated escape hatch (partner/internal REST) + spec + audit logs.
+givmo api GET /connect/charities?q=water
+givmo openapi pull --out openapi.json                 # Connect spec (--root for /openapi.json)
+givmo logs tail --filter tool_name=create_donation_intent --filter outcome=error
 
 # JSON everywhere:
 givmo --json charities search water
@@ -87,13 +97,15 @@ alternative to the human table/text output.
 
 ## Security posture
 
-- **Secretless money rail.** A donation is created via `create_donation_intent`,
-  which returns a **single-use, secretless hosted-checkout URL** carrying only an
-  opaque `gco_` token. The human completes payment **and accepts terms** on the
-  Givmo-hosted page. The CLI (and any agent driving it) **never** handles a card,
-  a `client_secret`, a `dn_` donation id, or accepts terms — it only *displays*
-  the checkout URL (and, with `--open`, opens it). The request body the CLI
-  constructs is asserted by test to carry no money-authorizing field.
+- **Secretless money rail.** A donation is created via the `create_donation_intent`
+  MCP tool, which returns a **single-use, secretless hosted-checkout URL** carrying
+  only an opaque `gco_` token. The human completes payment **and accepts terms** on
+  the Givmo-hosted page. The CLI (and any agent driving it) **never** handles a
+  card, a `client_secret`, or a terms-acceptance token, and never accepts terms —
+  it only *displays* the checkout URL (and, with `--open`, opens it). The
+  `donation_intent_id` (`dn_…`) it shows is a non-secret reference for correlation,
+  never an authorizer and never placed in the URL. The tool arguments the CLI
+  constructs are asserted by test to carry no money-authorizing field.
 - **Untrusted manifests.** `donate.json` manifests are treated as hostile input.
   `manifest validate` runs the vendored reference parser's strict `Parse` +
   tolerant `Sanitize` and surfaces **every** rejected/sanitized claim. No
@@ -122,7 +134,7 @@ Scripts and AI agents can branch on these deterministically (defined once in
 | `3` | auth required / failed | run `givmo login` |
 | `4` | not found | check the id via a `search`/`list` |
 | `5` | rate limited | back off, honor `Retry-After` |
-| `6` | network error / endpoint not live (ready-inert) | check connectivity / profile |
+| `6` | network error / endpoint not enabled | check connectivity / profile |
 | `7` | validation / rejected manifest | fix input; treat manifest as untrusted |
 
 ## Error envelope
@@ -143,7 +155,10 @@ Every error — local or from the backend — renders through **one** envelope. 
 ```
 
 `remediation` is phrased so an AI agent can act on it. The server `request_id` is
-included whenever the response carried one.
+included whenever the response carried one — extracted from the `X-Request-Id`
+header or either backend error shape (the root `{errors:[…]}` envelope and the
+Connect `{error:{…}}` envelope are both understood). A corrective MCP tool result
+(e.g. `not_found`, an out-of-range tax year) is mapped to the matching exit code.
 
 ## Configuration
 

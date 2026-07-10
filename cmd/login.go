@@ -84,8 +84,9 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	app.prodBanner("logging in")
 
 	// 1) Discover the authorization server via the MCP host's protected-resource
-	//    metadata, then the AS metadata. If discovery fails (endpoints not live),
-	//    fall back to the profile's configured auth base with conventional paths.
+	//    metadata, then the AS metadata. If discovery fails (metadata unreachable),
+	//    fall back to the profile's configured auth base with the conventional
+	//    Connect paths.
 	disc := auth.NewDiscoverer()
 	authBase := app.Profile.Endpoints.AuthBase
 	resource := app.Profile.Endpoints.APIBase + "/mcp"
@@ -177,8 +178,8 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	)
 }
 
-// discoverAuthServer resolves the AS metadata, falling back to conventional
-// endpoints when discovery is impossible (ready-inert endpoints).
+// discoverAuthServer resolves the AS metadata, falling back to the conventional
+// Connect endpoints when discovery is impossible (metadata unreachable).
 //
 // DEFENSE-IN-DEPTH: a discovered authorization_servers[0] / authorize / token
 // endpoint is otherwise adopted verbatim. We reject any non-https discovered AS
