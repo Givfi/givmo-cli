@@ -86,7 +86,7 @@ func TestExpectedSubcommands(t *testing.T) {
 	find("cause-etfs", "get")
 	find("donation-intents", "create")
 	find("donation-intents", "list")
-	find("receipts", "list")
+	find("receipts", "summary")
 	find("fixtures", "run")
 	find("sandbox", "seed")
 	find("sandbox", "reset")

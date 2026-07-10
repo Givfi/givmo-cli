@@ -2,24 +2,22 @@ package client
 
 import "net/url"
 
-// REST resource paths — the SINGLE source of truth for the CLI's backend path
-// contract.
+// Backend path contract for the CLI's REST-style surfaces — the SINGLE source of
+// truth for the paths the CLI speaks directly over HTTP.
 //
-// These are the platform's not-yet-live, ASSUMED paths (the CLI is ready-inert;
-// see the package/README notes). Collecting them here means the real backend
-// contract reconciles in ONE file at go-live, instead of chasing string
-// literals across cmd/*.go. Hosts and the OAuth endpoints are single-sourced
-// elsewhere (config profiles / auth discovery); this file owns the REST paths.
+// IMPORTANT: the CONSUMER catalog / giving / donation operations are NOT REST.
+// They are MCP tools on the /mcp surface (search_charities, get_charity_profile,
+// list_cause_etfs, get_cause_etf, get_receipt, create_donation_intent), invoked
+// over the CLI's own MCP bridge (internal/mcpbridge + cmd/toolcall.go). There is
+// no consumer-scope (givmo.*) REST route on the backend; the un-prefixed
+// /charities, /donation-intents, /receipts, /cause-etfs paths the CLI once
+// assumed do not exist on the consumer surface (root /charities is the separate
+// Firebase mobile API). Hence those consts are gone.
+//
+// The paths that remain here are the REST surfaces the CLI still calls directly:
+// the internal-operator audit-log tail on the Connect mount, the sandbox
+// developer-loop, and (via `openapi pull`) the published specs.
 const (
-	// PathCharities is the charity catalog collection (public tier).
-	PathCharities = "/charities"
-	// PathCauseETFs is the Cause ETF collection (public tier).
-	PathCauseETFs = "/cause-etfs"
-	// PathDonationIntents is the donation-intent collection (consumer tier).
-	PathDonationIntents = "/donation-intents"
-	// PathReceipts is the tax-receipt collection (consumer tier).
-	PathReceipts = "/receipts"
-
 	// Sandbox developer-loop paths (sandbox profile).
 	PathSandboxSeed          = "/sandbox/seed"
 	PathSandboxReset         = "/sandbox/reset"
@@ -27,22 +25,28 @@ const (
 	PathSandboxFixturesRun   = "/sandbox/fixtures/run"
 	PathSandboxManifestBatch = "/sandbox/manifests/batch"
 
-	// PathInternalAuditLogsTail is the internal-tier audit logs-tail API.
-	PathInternalAuditLogsTail = "/internal/audit-logs/tail"
+	// PathInternalAuditLogsTail is the internal-operator audit-log tail on the
+	// Connect mount: GET /connect/audit-logs (partner_scope internal.audit.read).
+	PathInternalAuditLogsTail = "/connect/audit-logs"
 )
 
-// OpenAPIPaths are the conventional locations the backend may publish its spec.
-// Ordered by preference; the first that returns 200 wins.
-var OpenAPIPaths = []string{"/openapi.json", "/api/openapi.json", "/.well-known/openapi.json"}
+// OpenAPIConnectPath is the Connect partner-API spec — the surface this CLI
+// targets, and the default for `openapi pull`.
+const OpenAPIConnectPath = "/connect/openapi.json"
+
+// OpenAPIRootPath is the root spec (the main/mobile-app FastAPI spec). It is
+// served in all environments but describes a different surface; `openapi pull`
+// reaches it only via the explicit --root flag.
+const OpenAPIRootPath = "/openapi.json"
 
 // ResourcePath joins a collection path and a single resource id, URL-escaping
-// the id. e.g. ResourcePath(PathCharities, "12-3456789") -> "/charities/12-3456789".
+// the id. e.g. ResourcePath("/connect/charities", "ch_1") -> "/connect/charities/ch_1".
 func ResourcePath(collection, id string) string {
 	return collection + "/" + url.PathEscape(id)
 }
 
 // CollectionQuery appends an already-encoded query string to a collection path
-// (omitting the "?" when empty). e.g. CollectionQuery(PathCharities, "q=water").
+// (omitting the "?" when empty). e.g. CollectionQuery("/connect/audit-logs", "limit=50").
 func CollectionQuery(collection, encodedQuery string) string {
 	if encodedQuery == "" {
 		return collection

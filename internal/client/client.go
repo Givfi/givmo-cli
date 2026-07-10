@@ -2,9 +2,12 @@
 // surface. It centralizes:
 //
 //   - request construction (base URL, bearer/api-key auth, user-agent),
-//   - the ONE error envelope (output.Error) mapped from HTTP status + the
-//     backend's `{ "errors": [...] }` shape,
-//   - server request_id extraction (X-Request-Id header or body),
+//   - the ONE error envelope (output.Error) mapped from HTTP status + BOTH
+//     backend error shapes: the root app's `{ "errors": [{code,title,detail,
+//     request_id}] }` and the Connect mount's `{ "error": {code,message,param,
+//     request_id} }` (deliberately different envelopes on the two surfaces),
+//   - server request_id extraction (X-Request-Id header, or body request_id /
+//     meta.request_id / error.request_id),
 //   - the paginated `{ "data": ..., "meta": ... }` envelope unwrap.
 //
 // Nothing here logs tokens; the Authorization header is never printed.
@@ -167,12 +170,16 @@ func requestIDFrom(resp *http.Response, body []byte) string {
 			return v
 		}
 	}
-	// Some backends echo it in the body.
+	// Some backends echo it in the body: the root envelope carries request_id
+	// (top-level or under meta); the Connect envelope carries it inside `error`.
 	var probe struct {
 		RequestID string `json:"request_id"`
 		Meta      struct {
 			RequestID string `json:"request_id"`
 		} `json:"meta"`
+		// `error` is an OBJECT on the Connect surface but may be a string on other
+		// paths, so parse it lazily (a mismatch must not void request_id/meta).
+		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(body, &probe) == nil {
 		if probe.RequestID != "" {
@@ -180,6 +187,14 @@ func requestIDFrom(resp *http.Response, body []byte) string {
 		}
 		if probe.Meta.RequestID != "" {
 			return probe.Meta.RequestID
+		}
+		if len(probe.Error) > 0 {
+			var eo struct {
+				RequestID string `json:"request_id"`
+			}
+			if json.Unmarshal(probe.Error, &eo) == nil && eo.RequestID != "" {
+				return eo.RequestID
+			}
 		}
 	}
 	return ""
@@ -241,33 +256,58 @@ func mapHTTPError(status int, body []byte, reqID string) *output.Error {
 	return output.New(code, msg, remediation).WithRequestID(reqID)
 }
 
-// serverErrorMessage extracts a human message from the backend's
-// `{ "errors": [{ "code", "title", "detail" }] }` shape (falling back to a
-// plain `{ "message" }` or `{ "error" }`).
+// serverErrorMessage extracts a human message from either backend error shape:
+// the root app's `{ "errors": [{code,title,detail}] }` and the Connect mount's
+// `{ "error": {code,message,param} }`. It falls back to a plain `{ "message" }`
+// or a bare `{ "error": "…" }` string.
 func serverErrorMessage(body []byte) (msg, remediation string) {
-	var jsonapi struct {
+	var env struct {
 		Errors []struct {
 			Title  string `json:"title"`
 			Detail string `json:"detail"`
 		} `json:"errors"`
 		Message string `json:"message"`
-		Error   string `json:"error"`
+		// `error` is an OBJECT on the Connect surface, a string on some others.
+		Error json.RawMessage `json:"error"`
 	}
-	if json.Unmarshal(body, &jsonapi) == nil {
-		if len(jsonapi.Errors) > 0 {
-			e := jsonapi.Errors[0]
-			if e.Detail != "" {
-				return e.Detail, ""
+	if json.Unmarshal(body, &env) != nil {
+		return "", ""
+	}
+	if len(env.Errors) > 0 {
+		e := env.Errors[0]
+		if e.Detail != "" {
+			return e.Detail, ""
+		}
+		if e.Title != "" {
+			return e.Title, ""
+		}
+	}
+	if env.Message != "" {
+		return env.Message, ""
+	}
+	if len(env.Error) > 0 {
+		// Connect envelope: {"error":{"message","code","param",…}}.
+		var eo struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+			Param   string `json:"param"`
+		}
+		if json.Unmarshal(env.Error, &eo) == nil {
+			m := eo.Message
+			if m == "" {
+				m = eo.Code
 			}
-			if e.Title != "" {
-				return e.Title, ""
+			if m != "" {
+				if eo.Param != "" {
+					return m + " (param: " + eo.Param + ")", ""
+				}
+				return m, ""
 			}
 		}
-		if jsonapi.Message != "" {
-			return jsonapi.Message, ""
-		}
-		if jsonapi.Error != "" {
-			return jsonapi.Error, ""
+		// Fallback: `error` as a bare string.
+		var es string
+		if json.Unmarshal(env.Error, &es) == nil && es != "" {
+			return es, ""
 		}
 	}
 	return "", ""

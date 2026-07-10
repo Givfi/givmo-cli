@@ -211,11 +211,19 @@ func discoverAuthServer(ctx context.Context, disc auth.Discoverer, apiBase, auth
 	if serr := validateAuthServerURL(base, allowLoopback); serr != nil {
 		return nil, serr
 	}
+	return fallbackAuthServerMetadata(base), nil
+}
+
+// fallbackAuthServerMetadata builds the conventional Givmo Connect AS metadata for
+// the discovery-down path: the real endpoints live under the /connect mount
+// (/connect/oauth/authorize + /connect/oauth/token). Pure → unit-tested.
+func fallbackAuthServerMetadata(base string) *auth.AuthServerMetadata {
+	base = strings.TrimRight(base, "/")
 	return &auth.AuthServerMetadata{
 		Issuer:                base,
-		AuthorizationEndpoint: base + "/oauth/authorize",
-		TokenEndpoint:         base + "/oauth/token",
-	}, nil
+		AuthorizationEndpoint: base + "/connect/oauth/authorize",
+		TokenEndpoint:         base + "/connect/oauth/token",
+	}
 }
 
 // validateAuthServerURL enforces https on an authorization-server URL, allowing

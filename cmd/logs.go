@@ -17,35 +17,52 @@ var logsFilters []string
 func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Consume the internal audit logs-tail API",
-		Long: `Tail the Givmo internal audit log (tool-call telemetry).
+		Short: "Consume the internal-operator audit-log tail (GET /connect/audit-logs)",
+		Long: `Tail the Givmo internal-operator audit log (per-op tool-call telemetry) from
+GET /connect/audit-logs on the Connect mount.
 
-This uses the INTERNAL credential, which is dark until configured. Set the
-credential via GIVMO_INTERNAL_TOKEN (S2S). Without it, the command fails with a
-clear, actionable error rather than a partial/empty result.`,
+This uses the INTERNAL credential (internal.audit.read), which is dark until
+configured. Set it via GIVMO_INTERNAL_TOKEN. Without it, the command fails with a
+clear, actionable error rather than a partial/empty result. The response is a
+keyset-paginated {data, next_cursor} JSON envelope; page with --filter limit=N and
+--filter cursor=<next_cursor>.`,
 	}
 	cmd.AddCommand(newLogsTailCmd())
 	return cmd
 }
 
+// logsFilterKeys is the allowlist of GET /connect/audit-logs query params the
+// --filter flag accepts. Each key is the backend's real param name and is sent
+// verbatim as the wire query key. `audience` filters by the audit row's audience
+// (an additive backend param).
+var logsFilterKeys = []string{
+	"tool_name", "outcome", "principal_client_id",
+	"occurred_after", "occurred_before",
+	"side_effect", "resource_type", "resource_id",
+	"audience", "limit", "cursor",
+}
+
 // buildLogsQuery converts --filter k=v pairs into a query string. Pure →
-// unit-tested. Only a documented allowlist of filter keys is accepted.
+// unit-tested. Only the documented allowlist of backend param keys is accepted.
 func buildLogsQuery(filters []string) (url.Values, error) {
-	allowed := map[string]bool{"tool": true, "outcome": true, "principal": true, "since": true}
+	allowed := map[string]bool{}
+	for _, k := range logsFilterKeys {
+		allowed[k] = true
+	}
 	q := url.Values{}
 	for _, f := range filters {
 		eq := strings.IndexByte(f, '=')
 		if eq < 0 {
 			return nil, output.New(output.ExitUsage,
 				fmt.Sprintf("invalid --filter %q", f),
-				"Use k=v form, e.g. --filter tool=create_donation_intent --filter outcome=denied.")
+				"Use k=v form, e.g. --filter tool_name=create_donation_intent --filter outcome=error.")
 		}
 		k := strings.TrimSpace(f[:eq])
 		v := f[eq+1:]
 		if !allowed[k] {
 			return nil, output.New(output.ExitUsage,
 				fmt.Sprintf("unknown filter key %q", k),
-				"Allowed filter keys: tool, outcome, principal, since.")
+				"Allowed filter keys: "+strings.Join(logsFilterKeys, ", ")+".")
 		}
 		q.Add(k, v)
 	}
@@ -59,8 +76,8 @@ func internalToken() string {
 
 func newLogsTailCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "tail [--filter tool=… --filter outcome=…]",
-		Short: "Tail the internal audit log",
+		Use:   "tail [--filter tool_name=… --filter outcome=…]",
+		Short: "Tail the internal-operator audit log",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			app, err := resolveAppCtx()
@@ -109,13 +126,13 @@ func newLogsTailCmd() *cobra.Command {
 					fmt.Sprintf("internal logs API returned HTTP %d", resp.StatusCode),
 					"Retry; the audit-logs surface may not be enabled yet.")
 			}
-			// Stream/print the body as-is (NDJSON or JSON array).
+			// Stream/print the body as-is (the {data, next_cursor} JSON envelope).
 			if _, werr := app.Printer.Out.Write(body); werr != nil {
 				return output.New(output.ExitGeneric, werr.Error(), "")
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&logsFilters, "filter", nil, "filter events (k=v; repeatable; keys: tool, outcome, principal, since)")
+	cmd.Flags().StringArrayVar(&logsFilters, "filter", nil, "filter events (k=v; repeatable; keys: "+strings.Join(logsFilterKeys, ", ")+")")
 	return cmd
 }

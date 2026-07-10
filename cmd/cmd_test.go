@@ -1,48 +1,72 @@
 package cmd
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/givfi/givmo-cli/internal/output"
 )
 
-func TestBuildCreateIntentBody_ValidAndInvalid(t *testing.T) {
-	// Valid.
-	body, err := buildCreateIntentBody("c_1", 2500)
+func TestBuildCreateIntentArgs_ValidAndInvalid(t *testing.T) {
+	// Valid (charity target).
+	args, err := buildCreateIntentArgs("ch_1", "", 2500, "idem-1", "")
 	if err != nil {
-		t.Fatalf("valid intent body errored: %v", err)
+		t.Fatalf("valid intent args errored: %v", err)
 	}
-	var got map[string]any
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("body not JSON: %v", err)
+	if args["charity_id"] != "ch_1" {
+		t.Errorf("charity_id = %v", args["charity_id"])
 	}
-	if got["charity_id"] != "c_1" {
-		t.Errorf("charity_id = %v", got["charity_id"])
+	if args["amount_cents"].(int) != 2500 {
+		t.Errorf("amount_cents = %v", args["amount_cents"])
 	}
-	if got["amount_cents"].(float64) != 2500 {
-		t.Errorf("amount_cents = %v", got["amount_cents"])
+	if args["idempotency_key"] != "idem-1" {
+		t.Errorf("idempotency_key = %v", args["idempotency_key"])
 	}
-	// MONEY-SAFETY: the request body must NEVER carry anything that could
+	if _, present := args["cause_etf_id"]; present {
+		t.Error("cause_etf_id must be absent when a charity is the target")
+	}
+	// MONEY-SAFETY: the tool arguments must NEVER carry anything that could
 	// authorize money — no card, client_secret, token, or terms acceptance.
 	for _, forbidden := range []string{"card", "client_secret", "token", "accept_terms", "dn_", "payment_method"} {
-		if _, present := got[forbidden]; present {
-			t.Errorf("intent body must not carry money-authorizing field %q", forbidden)
+		if _, present := args[forbidden]; present {
+			t.Errorf("intent args must not carry money-authorizing field %q", forbidden)
 		}
 	}
 
-	// Missing charity.
-	if _, err := buildCreateIntentBody("", 100); err == nil {
-		t.Error("expected error for missing charity")
+	// Valid (cause-etf target) + return_url.
+	args, err = buildCreateIntentArgs("", "cetf_9", 500, "idem-2", "https://x.test/return")
+	if err != nil {
+		t.Fatalf("valid etf intent args errored: %v", err)
+	}
+	if args["cause_etf_id"] != "cetf_9" {
+		t.Errorf("cause_etf_id = %v", args["cause_etf_id"])
+	}
+	if _, present := args["charity_id"]; present {
+		t.Error("charity_id must be absent when a cause-etf is the target")
+	}
+	if args["return_url"] != "https://x.test/return" {
+		t.Errorf("return_url = %v", args["return_url"])
+	}
+
+	// Exactly-one-target: neither is a usage error.
+	if _, err := buildCreateIntentArgs("", "", 100, "k", ""); err == nil {
+		t.Error("expected error for no target")
 	} else if output.AsError(err).Code != output.ExitUsage {
-		t.Errorf("missing charity should be usage error, got %d", output.AsError(err).Code)
+		t.Errorf("no target should be usage error, got %d", output.AsError(err).Code)
+	}
+	// Both targets is a usage error.
+	if _, err := buildCreateIntentArgs("ch_1", "cetf_1", 100, "k", ""); err == nil {
+		t.Error("expected error for both targets")
 	}
 	// Non-positive amount.
-	if _, err := buildCreateIntentBody("c_1", 0); err == nil {
+	if _, err := buildCreateIntentArgs("ch_1", "", 0, "k", ""); err == nil {
 		t.Error("expected error for zero amount")
 	}
-	if _, err := buildCreateIntentBody("c_1", -5); err == nil {
+	if _, err := buildCreateIntentArgs("ch_1", "", -5, "k", ""); err == nil {
 		t.Error("expected error for negative amount")
+	}
+	// Empty idempotency key.
+	if _, err := buildCreateIntentArgs("ch_1", "", 100, "  ", ""); err == nil {
+		t.Error("expected error for empty idempotency key")
 	}
 }
 
@@ -80,20 +104,10 @@ func TestParseOverrides(t *testing.T) {
 	}
 }
 
-func TestValidateReceiptFormat(t *testing.T) {
-	for _, ok := range []string{"", "json", "pdf"} {
-		if err := validateReceiptFormat(ok); err != nil {
-			t.Errorf("format %q should be valid: %v", ok, err)
-		}
-	}
-	if err := validateReceiptFormat("csv"); err == nil {
-		t.Error("csv format should be rejected")
-	}
-}
-
 func TestValidateTaxYear(t *testing.T) {
-	if err := validateTaxYear(0); err == nil {
-		t.Error("missing tax year should error")
+	// 0 is allowed now: it means "let the server default to the current year".
+	if err := validateTaxYear(0); err != nil {
+		t.Errorf("zero tax year should be allowed (default): %v", err)
 	}
 	if err := validateTaxYear(1999); err == nil {
 		t.Error("out-of-range low year should error")
@@ -104,19 +118,30 @@ func TestValidateTaxYear(t *testing.T) {
 }
 
 func TestBuildLogsQuery(t *testing.T) {
-	q, err := buildLogsQuery([]string{"tool=create_donation_intent", "outcome=denied"})
+	q, err := buildLogsQuery([]string{"tool_name=create_donation_intent", "outcome=error", "audience=consumer"})
 	if err != nil {
 		t.Fatalf("buildLogsQuery: %v", err)
 	}
-	if q.Get("tool") != "create_donation_intent" || q.Get("outcome") != "denied" {
+	if q.Get("tool_name") != "create_donation_intent" || q.Get("outcome") != "error" {
 		t.Errorf("query wrong: %v", q)
+	}
+	// The audience filter (additive backend param) is accepted.
+	if q.Get("audience") != "consumer" {
+		t.Errorf("audience filter not passed: %v", q)
+	}
+	// The OLD key names are no longer accepted (renamed to backend params).
+	if _, err := buildLogsQuery([]string{"tool=x"}); err == nil {
+		t.Error("legacy key 'tool' should be rejected (now tool_name)")
+	}
+	if _, err := buildLogsQuery([]string{"principal=x"}); err == nil {
+		t.Error("legacy key 'principal' should be rejected (now principal_client_id)")
 	}
 	// Unknown key rejected.
 	if _, err := buildLogsQuery([]string{"badkey=x"}); err == nil {
 		t.Error("unknown filter key should be rejected")
 	}
 	// Missing '=' rejected.
-	if _, err := buildLogsQuery([]string{"tool"}); err == nil {
+	if _, err := buildLogsQuery([]string{"tool_name"}); err == nil {
 		t.Error("filter without '=' should be rejected")
 	}
 }

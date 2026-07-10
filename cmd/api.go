@@ -22,16 +22,23 @@ func newAPICmd() *cobra.Command {
 		Use:   "api <METHOD> <path> [--data <json>]",
 		Short: "Authenticated escape hatch to the Givmo REST API",
 		Long: `Make an authenticated raw request to the Givmo REST API against the active
-profile. Useful for endpoints without a dedicated command.
+profile. Useful for partner/internal endpoints without a dedicated command.
 
 The stored credential (or GIVMO_API_KEY) is attached automatically. The response
 body is printed; errors render through the standard envelope with a stable exit
 code. Non-GET methods print the production banner when the production profile is
 active.
 
+Note: the consumer catalog/giving/donation commands (charities, cause-etfs,
+receipts, donation-intents) go over the MCP tools, not REST. The partner REST
+surface lives under /connect/*. Do NOT use this raw passthrough for donations: a
+partner donation-intent response can carry a client_secret, and this command
+prints the body verbatim — use 'givmo donation-intents create', which surfaces
+only the secretless gco_ checkout URL.
+
 Examples:
-  givmo api GET /charities?q=water
-  givmo api POST /donation-intents --data '{"charity_id":"c_1","amount_cents":2500}'`,
+  givmo api GET /connect/charities?q=water
+  givmo api GET /connect/audit-logs?limit=25`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			app, err := resolveAppCtx()
