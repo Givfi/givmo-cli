@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/givfi/givmo-cli/internal/auth"
@@ -167,4 +168,68 @@ func TestRequestID_FromBodyWhenNoHeader(t *testing.T) {
 		t.Errorf("request_id from body meta = %q", resp.RequestID)
 	}
 	_ = json.RawMessage(resp.Raw)
+}
+
+func TestDo_ParsesConnectErrorEnvelope(t *testing.T) {
+	// The Connect mount speaks {"error":{type,code,message,param,request_id}} —
+	// distinct from the root {"errors":[...]} shape.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"type":"invalid_request","code":"missing_field","message":"amount_cents is required","param":"amount_cents","request_id":"conn-req-9"}}`))
+	}))
+	defer srv.Close()
+	c := New(Options{BaseURL: srv.URL})
+	_, err := c.Do(context.Background(), "POST", "/connect/donation-intents", []byte(`{}`), false)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	oe := output.AsError(err)
+	if oe.Code != output.ExitValidation {
+		t.Errorf("exit = %d, want ExitValidation", oe.Code)
+	}
+	if !strings.Contains(oe.Message, "amount_cents is required") {
+		t.Errorf("connect message not surfaced: %q", oe.Message)
+	}
+	if !strings.Contains(oe.Message, "param: amount_cents") {
+		t.Errorf("connect param not surfaced: %q", oe.Message)
+	}
+	// request_id comes from error.request_id (no header, no top-level field).
+	if oe.RequestID != "conn-req-9" {
+		t.Errorf("connect error.request_id = %q, want conn-req-9", oe.RequestID)
+	}
+}
+
+func TestServerErrorMessage_BothEnvelopes(t *testing.T) {
+	// Root envelope: errors[].detail wins.
+	if msg, _ := serverErrorMessage([]byte(`{"errors":[{"code":"x","title":"T","detail":"D"}]}`)); msg != "D" {
+		t.Errorf("root detail = %q, want D", msg)
+	}
+	// Connect envelope: error.message (+ param).
+	if msg, _ := serverErrorMessage([]byte(`{"error":{"code":"c","message":"boom","param":"p"}}`)); !strings.Contains(msg, "boom") || !strings.Contains(msg, "p") {
+		t.Errorf("connect message = %q", msg)
+	}
+	// Connect envelope with only a code falls back to the code.
+	if msg, _ := serverErrorMessage([]byte(`{"error":{"code":"only_code"}}`)); msg != "only_code" {
+		t.Errorf("connect code fallback = %q", msg)
+	}
+	// Bare string error (legacy path).
+	if msg, _ := serverErrorMessage([]byte(`{"error":"legacy"}`)); msg != "legacy" {
+		t.Errorf("bare error string = %q", msg)
+	}
+	// Plain message.
+	if msg, _ := serverErrorMessage([]byte(`{"message":"m"}`)); msg != "m" {
+		t.Errorf("plain message = %q", msg)
+	}
+}
+
+func TestRequestID_FromConnectErrorObject(t *testing.T) {
+	// error.request_id is extracted even when error is an object (Connect) and no
+	// header / top-level request_id is present.
+	if got := requestIDFrom(&http.Response{Header: http.Header{}}, []byte(`{"error":{"request_id":"conn-1"}}`)); got != "conn-1" {
+		t.Errorf("request_id from error object = %q, want conn-1", got)
+	}
+	// A bare string error must NOT break extraction of a top-level request_id.
+	if got := requestIDFrom(&http.Response{Header: http.Header{}}, []byte(`{"error":"oops","request_id":"top-1"}`)); got != "top-1" {
+		t.Errorf("request_id with string error = %q, want top-1", got)
+	}
 }
