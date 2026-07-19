@@ -147,6 +147,8 @@ var donationRejectionCodes = map[string]bool{
 	"charity_inactive":                true, // covers an inactive charity AND an inactive cause ETF
 	"invalid_email":                   true,
 	"amount_limit_exceeded":           true,
+	"amount_below_charity_minimum":    true, // CT-RM-8: below the direct charity's advertised min_donation_cents
+	"amount_above_charity_maximum":    true, // CT-RM-8: above the direct charity's advertised max_donation_cents
 	"link_token_not_supported":        true,
 	"reserved_metadata_key":           true,
 	"invalid_request":                 true,

@@ -200,6 +200,8 @@ func TestCallTool_MoneyRejectionKeysOnCodeNotText(t *testing.T) {
 		{"cause_etf_inactive_reuses_charity_inactive", "charity_inactive: The target cause ETF is not available for donations."},
 		{"invalid_amount", "invalid_amount: Donation must be at least $5.00."},
 		{"amount_limit_exceeded", "amount_limit_exceeded: amount exceeds the per-donation cap."},
+		{"amount_below_charity_minimum", "amount_below_charity_minimum: amount_cents must be at least 500 for this charity."},
+		{"amount_above_charity_maximum", "amount_above_charity_maximum: amount_cents must be at most 1000000 for this charity."},
 		{"invalid_request", "invalid_request: cause_etf_id is not a valid id."},
 	}
 	for _, tc := range cases {
