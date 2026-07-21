@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/givfi/givmo-cli/internal/auth"
@@ -15,6 +16,27 @@ type failingDiscoverer struct{}
 
 func (failingDiscoverer) ProtectedResource(context.Context, string) (*auth.ProtectedResourceMetadata, error) {
 	return nil, errors.New("discovery down")
+}
+
+func TestLoginCommand_RejectsInvalidPort(t *testing.T) {
+	for _, port := range []string{"0", "65536"} {
+		t.Run(port, func(t *testing.T) {
+			cmd := newLoginCmd()
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs([]string{"--port", port})
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("expected invalid port error")
+			}
+			if got := output.AsError(err).Code; got != output.ExitValidation {
+				t.Errorf("exit code = %d, want %d", got, output.ExitValidation)
+			}
+			if !strings.Contains(err.Error(), port) {
+				t.Errorf("error %q does not name bad port %s", err, port)
+			}
+		})
+	}
 }
 
 func (failingDiscoverer) AuthServer(context.Context, string) (*auth.AuthServerMetadata, error) {
