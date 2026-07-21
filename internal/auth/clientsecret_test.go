@@ -2,6 +2,18 @@ package auth
 
 import "testing"
 
+func TestResolveClientID_Precedence(t *testing.T) {
+	t.Setenv("GIVMO_CLIENT_ID", "gci-test-override")
+	if got := ResolveClientID(); got != "gci-test-override" {
+		t.Errorf("ResolveClientID env = %q, want %q", got, "gci-test-override")
+	}
+
+	t.Setenv("GIVMO_CLIENT_ID", "")
+	if got := ResolveClientID(); got != ClientID {
+		t.Errorf("ResolveClientID default = %q, want %q", got, ClientID)
+	}
+}
+
 func TestResolveClientSecret_Precedence(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GIVMO_HOME", dir)

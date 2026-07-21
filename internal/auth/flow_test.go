@@ -61,6 +61,25 @@ func TestBuildAuthorizeURL_RequiresPKCE(t *testing.T) {
 	}
 }
 
+func TestBuildAuthorizeURL_ClientIDOverride(t *testing.T) {
+	t.Setenv("GIVMO_CLIENT_ID", "gci-test-override")
+	got, err := BuildAuthorizeURL(AuthorizeParams{
+		AuthorizationEndpoint: "https://connect.givmo.io/oauth/authorize",
+		ClientID:              ResolveClientID(),
+		PKCE:                  &PKCE{Challenge: "chal", Method: "S256", State: "state"},
+	})
+	if err != nil {
+		t.Fatalf("BuildAuthorizeURL: %v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("result is not a URL: %v", err)
+	}
+	if got := u.Query().Get("client_id"); got != "gci-test-override" {
+		t.Errorf("client_id = %q, want %q", got, "gci-test-override")
+	}
+}
+
 func TestBuildExchangeForm_Fields(t *testing.T) {
 	form := BuildExchangeForm(ExchangeParams{
 		TokenEndpoint: "https://connect.givmo.io/oauth/token",
@@ -184,7 +203,7 @@ func TestExchangeCode_ClientSecretBasicWireShape(t *testing.T) {
 	const secret = "s3cr3t+/=value"
 	params := ExchangeParams{
 		TokenEndpoint: server.URL,
-		ClientID:      "givmo-cli",
+		ClientID:      "gci-test-override",
 		ClientSecret:  secret,
 		Code:          "the-code",
 		RedirectURI:   "http://127.0.0.1:8765/callback",
@@ -197,14 +216,20 @@ func TestExchangeCode_ClientSecretBasicWireShape(t *testing.T) {
 	if !strings.HasPrefix(got.authorization, "Basic ") {
 		t.Fatalf("Authorization = %q, want Basic prefix", got.authorization)
 	}
-	wantCredentials := url.QueryEscape(params.ClientID) + ":" + url.QueryEscape(secret)
 	encoded := strings.TrimPrefix(got.authorization, "Basic ")
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		t.Fatalf("decode Authorization header: %v", err)
 	}
-	if string(decoded) != wantCredentials {
-		t.Errorf("decoded Authorization = %q, want %q", decoded, wantCredentials)
+	username, password, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		t.Fatalf("decoded Authorization %q has no credential separator", decoded)
+	}
+	if want := url.QueryEscape("gci-test-override"); username != want {
+		t.Errorf("encoded username = %q, want %q", username, want)
+	}
+	if want := url.QueryEscape(secret); password != want {
+		t.Errorf("encoded password = %q, want %q", password, want)
 	}
 	if got.contentType != "application/x-www-form-urlencoded" {
 		t.Errorf("Content-Type = %q", got.contentType)

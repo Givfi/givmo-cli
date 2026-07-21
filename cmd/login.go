@@ -33,11 +33,13 @@ redirect at http://127.0.0.1:<port>/callback. That exact redirect URI must be
 registered for your Givmo OAuth client. The default port 8765 matches the
 first-party Givmo connector client.
 
-The client secret is read from GIVMO_CLIENT_SECRET first, then from the OS
-keychain or 0600 file store. It is never accepted as a flag. A secret sourced
-from the environment is stored after the first successful login. The Givmo
-authorization server currently supports confidential clients only; dynamic and
-public client registration are future capabilities.
+GIVMO_CLIENT_ID overrides the built-in first-party client id (givmo-cli). Set it
+together with GIVMO_CLIENT_SECRET to authenticate as your own registered
+confidential client. The client secret is read from GIVMO_CLIENT_SECRET first,
+then from the OS keychain or 0600 file store. It is never accepted as a flag. A
+secret sourced from the environment is stored after the first successful login.
+The Givmo authorization server currently supports confidential clients only;
+dynamic and public client registration are future capabilities.
 
 The resulting consumer token is scoped to:
   givmo.donations.read  givmo.receipts.read
@@ -98,6 +100,7 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	ctx, cancel := context.WithTimeout(parent, loginTimeout)
 	defer cancel()
 
+	clientID := auth.ResolveClientID()
 	clientSecret, secretSource, err := auth.ResolveClientSecret(app.Store, app.Profile.Name)
 	if err != nil {
 		return output.New(output.ExitGeneric, "could not resolve OAuth client secret: "+err.Error(),
@@ -144,7 +147,7 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	// 4) Build the authorize URL.
 	authorizeURL, err := auth.BuildAuthorizeURL(auth.AuthorizeParams{
 		AuthorizationEndpoint: asMeta.AuthorizationEndpoint,
-		ClientID:              auth.ClientID,
+		ClientID:              clientID,
 		RedirectURI:           listener.RedirectURI,
 		Scopes:                auth.DefaultScopes(),
 		PKCE:                  pk,
@@ -174,7 +177,7 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	// 7) Exchange the code for tokens.
 	tok, err := auth.ExchangeCode(ctx, app.httpClient(), auth.ExchangeParams{
 		TokenEndpoint: asMeta.TokenEndpoint,
-		ClientID:      auth.ClientID,
+		ClientID:      clientID,
 		ClientSecret:  clientSecret,
 		Code:          res.Code,
 		RedirectURI:   listener.RedirectURI,

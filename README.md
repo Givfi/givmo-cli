@@ -169,6 +169,7 @@ Connect `{error:{…}}` envelope are both understood). A corrective MCP tool res
 | API base | `GIVMO_API_BASE` | `https://mcp.givmo.io` | `https://mcp-dev.givmo.io` |
 | auth base | `GIVMO_AUTH_BASE` | `https://api.givmo.io` | `https://api-dev.givmo.io` |
 | API key (CI) | `GIVMO_API_KEY` | — | — |
+| OAuth client id | `GIVMO_CLIENT_ID` | `givmo-cli` (built-in first-party connector id) | `givmo-cli` (built-in first-party connector id) |
 | OAuth client secret | `GIVMO_CLIENT_SECRET` | keychain / 0600 file | keychain / 0600 file |
 | internal S2S token | `GIVMO_INTERNAL_TOKEN` | — (dark) | — (dark) |
 | config/state dir | `GIVMO_HOME` | `~/.givmo` | `~/.givmo` |
@@ -183,13 +184,16 @@ Precedence: environment variables > `~/.givmo/config.json` > built-in defaults.
 `http://127.0.0.1:N/callback` must be registered for your Givmo OAuth client.
 Port 8765 matches the registered first-party Givmo connector client.
 
-Interactive login requires a confidential OAuth client secret. The CLI reads
-`GIVMO_CLIENT_SECRET` first, then the active profile's separate keychain or 0600
-file slot. It never accepts the secret as a command-line flag. After the first
-successful environment-sourced login, the CLI stores the secret for subsequent
-logins. The Givmo authorization server currently supports confidential clients
-only; dynamic and public client registration are future capabilities. PKCE S256
-and callback `state` validation remain enabled alongside client authentication.
+Interactive login requires a confidential OAuth client secret.
+`GIVMO_CLIENT_ID` overrides the built-in first-party `givmo-cli` client id; set
+it together with `GIVMO_CLIENT_SECRET` to authenticate as your own registered
+confidential client. The CLI reads `GIVMO_CLIENT_SECRET` first, then the active
+profile's separate keychain or 0600 file slot. It never accepts the secret as a
+command-line flag. After the first successful environment-sourced login, the CLI
+stores the secret for subsequent logins. The Givmo authorization server
+currently supports confidential clients only; dynamic and public client
+registration are future capabilities. PKCE S256 and callback `state` validation
+remain enabled alongside client authentication.
 
 ## Development
 
