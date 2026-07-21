@@ -47,8 +47,8 @@ else is the Go standard library.
 givmo config use-profile sandbox
 givmo config view
 
-# 2. Authenticate (consumer OAuth via PKCE loopback). Opens your browser.
-givmo login
+# 2. Authenticate (confidential-client OAuth + PKCE loopback). Opens your browser.
+GIVMO_CLIENT_SECRET=… givmo login
 givmo whoami                 # linked identity + granted scopes (no secrets)
 
 #    Non-interactive / CI:
@@ -100,12 +100,13 @@ alternative to the human table/text output.
 - **Secretless money rail.** A donation is created via the `create_donation_intent`
   MCP tool, which returns a **single-use, secretless hosted-checkout URL** carrying
   only an opaque `gco_` token. The human completes payment **and accepts terms** on
-  the Givmo-hosted page. The CLI (and any agent driving it) **never** handles a
-  card, a `client_secret`, or a terms-acceptance token, and never accepts terms —
-  it only *displays* the checkout URL (and, with `--open`, opens it). The
-  `donation_intent_id` (`dn_…`) it shows is a non-secret reference for correlation,
-  never an authorizer and never placed in the URL. The tool arguments the CLI
-  constructs are asserted by test to carry no money-authorizing field.
+  the Givmo-hosted page. The donation path (and any agent driving it) **never**
+  handles a card, a payment `client_secret`, or a terms-acceptance token, and
+  never accepts terms — it only *displays* the checkout URL (and, with `--open`,
+  opens it). The `donation_intent_id` (`dn_…`) it shows is a non-secret reference
+  for correlation, never an authorizer and never placed in the URL. The tool
+  arguments the CLI constructs are asserted by test to carry no money-authorizing
+  field.
 - **Untrusted manifests.** `donate.json` manifests are treated as hostile input.
   `manifest validate` runs the vendored reference parser's strict `Parse` +
   tolerant `Sanitize` and surfaces **every** rejected/sanitized claim. No
@@ -114,10 +115,10 @@ alternative to the human table/text output.
   URL inputs are HTTPS-only (the fetch **refuses to follow redirects**, so the
   HTTPS-only guarantee holds across hops and an SSRF redirect to an
   internal/metadata address cannot be reached), time-bounded, and size-capped.
-- **No secret to disk in the clear / no secret in logs.** Tokens are stored in
-  the OS keychain when available (macOS `security`), else in a `0600` file under
-  `~/.givmo`. Tokens are **never** logged and **never** appear in `--json` output;
-  `whoami` shows identity + scopes only.
+- **No auth secret in logs or JSON.** Tokens and the OAuth client secret are
+  stored in the OS keychain when available (macOS `security`), else in separate
+  `0600` files under `~/.givmo`. They are **never** logged and **never** appear in
+  `--json` output; `whoami` shows identity + scopes only.
 - **Production guardrail.** The `production` profile prints a loud banner before
   any mutating operation.
 
@@ -168,11 +169,31 @@ Connect `{error:{…}}` envelope are both understood). A corrective MCP tool res
 | API base | `GIVMO_API_BASE` | `https://mcp.givmo.io` | `https://mcp-dev.givmo.io` |
 | auth base | `GIVMO_AUTH_BASE` | `https://api.givmo.io` | `https://api-dev.givmo.io` |
 | API key (CI) | `GIVMO_API_KEY` | — | — |
+| OAuth client id | `GIVMO_CLIENT_ID` | `givmo-cli` (built-in first-party connector id) | `givmo-cli` (built-in first-party connector id) |
+| OAuth client secret | `GIVMO_CLIENT_SECRET` | keychain / 0600 file | keychain / 0600 file |
 | internal S2S token | `GIVMO_INTERNAL_TOKEN` | — (dark) | — (dark) |
 | config/state dir | `GIVMO_HOME` | `~/.givmo` | `~/.givmo` |
 | token backend | `GIVMO_TOKEN_BACKEND` | keychain (macOS) / file | — |
 
 Precedence: environment variables > `~/.givmo/config.json` > built-in defaults.
+
+### Interactive login
+
+`givmo login` binds `127.0.0.1:8765` by default and uses the exact redirect URI
+`http://127.0.0.1:8765/callback`. To use another callback port, pass `--port N`;
+`http://127.0.0.1:N/callback` must be registered for your Givmo OAuth client.
+Port 8765 matches the registered first-party Givmo connector client.
+
+Interactive login requires a confidential OAuth client secret.
+`GIVMO_CLIENT_ID` overrides the built-in first-party `givmo-cli` client id; set
+it together with `GIVMO_CLIENT_SECRET` to authenticate as your own registered
+confidential client. The CLI reads `GIVMO_CLIENT_SECRET` first, then the active
+profile's separate keychain or 0600 file slot. It never accepts the secret as a
+command-line flag. After the first successful environment-sourced login, the CLI
+stores the secret for subsequent logins. The Givmo authorization server
+currently supports confidential clients only; dynamic and public client
+registration are future capabilities. PKCE S256 and callback `state` validation
+remain enabled alongside client authentication.
 
 ## Development
 

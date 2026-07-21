@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,6 +62,71 @@ func TestFileStore_RoundTripAndPerms(t *testing.T) {
 	}
 	if _, err := s.Load("sandbox"); err != ErrNoCredential {
 		t.Fatalf("expected ErrNoCredential after delete, got %v", err)
+	}
+}
+
+func TestFileStore_ClientSecretRoundTripAndDelete(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIVMO_HOME", dir)
+	t.Setenv("GIVMO_TOKEN_BACKEND", "file")
+
+	s, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	secret, err := s.LoadClientSecret("sandbox")
+	if err != nil {
+		t.Fatalf("LoadClientSecret absent: %v", err)
+	}
+	if secret != "" {
+		t.Errorf("absent client secret = %q, want empty", secret)
+	}
+
+	const testSecret = "test-client-secret"
+	if err := s.SaveClientSecret("sandbox", testSecret); err != nil {
+		t.Fatalf("SaveClientSecret: %v", err)
+	}
+	secret, err = s.LoadClientSecret("sandbox")
+	if err != nil {
+		t.Fatalf("LoadClientSecret: %v", err)
+	}
+	if secret != testSecret {
+		t.Errorf("client secret = %q, want test fixture", secret)
+	}
+
+	secretPath := filepath.Join(dir, "credentials", "sandbox.client-secret")
+	info, err := os.Stat(secretPath)
+	if err != nil {
+		t.Fatalf("stat client secret: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("client secret file perms = %o, want 0600", perm)
+	}
+
+	cred := &Credential{
+		Profile:     "sandbox",
+		Type:        CredTypeOAuth,
+		AccessToken: "test-access-token",
+	}
+	if err := s.Save(cred); err != nil {
+		t.Fatalf("Save credential: %v", err)
+	}
+	credPath := filepath.Join(dir, "credentials", "sandbox.json")
+	credentialBlob, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatalf("read credential blob: %v", err)
+	}
+	if bytes.Contains(credentialBlob, []byte(testSecret)) {
+		t.Fatal("credential blob contains client secret")
+	}
+
+	if err := s.Delete("sandbox"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	for _, path := range []string{credPath, secretPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be deleted, got %v", path, err)
+		}
 	}
 }
 
