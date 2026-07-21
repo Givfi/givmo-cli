@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +14,9 @@ import (
 	"time"
 )
 
-// ClientID is the CLI's public OAuth client id registered with Givmo Connect.
-// A public native client carries no secret; PKCE is the proof mechanism.
+// ClientID is the CLI's confidential OAuth client id registered with Givmo
+// Connect. The CLI authenticates with a client secret and also uses PKCE; the
+// Givmo authorization server does not support public clients.
 const ClientID = "givmo-cli"
 
 // ProtectedResourceMetadata is the RFC 9728 document published by the MCP host
@@ -130,9 +132,9 @@ type LoopbackResult struct {
 	Err   string // the OAuth `error` param, if the AS reported one
 }
 
-// LoopbackListener runs a localhost HTTP server on an ephemeral port to catch
-// the authorization redirect. The returned RedirectURI must be used in the
-// authorize request. Call Wait to block for the callback (bounded by ctx).
+// LoopbackListener runs a localhost HTTP server to catch the authorization
+// redirect. The returned RedirectURI must be used in the authorize request.
+// Call Wait to block for the callback (bounded by ctx).
 type LoopbackListener struct {
 	ln          net.Listener
 	srv         *http.Server
@@ -141,20 +143,23 @@ type LoopbackListener struct {
 	expectState string
 }
 
-// NewLoopbackListener binds 127.0.0.1 on an ephemeral port with the given
-// callback path (e.g. "/callback"). expectState is validated on receipt.
-func NewLoopbackListener(path, expectState string) (*LoopbackListener, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// NewLoopbackListener binds 127.0.0.1 on port with the given callback path
+// (e.g. "/callback"). Port 0 requests an ephemeral port. expectState is
+// validated on receipt.
+func NewLoopbackListener(path, expectState string, port int) (*LoopbackListener, error) {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("bind loopback listener: %w", err)
+		return nil, fmt.Errorf("bind loopback callback listener on %s: %w", addr, err)
 	}
 	if path == "" {
 		path = "/callback"
 	}
+	boundPort := ln.Addr().(*net.TCPAddr).Port
 	l := &LoopbackListener{
 		ln:          ln,
 		resultCh:    make(chan LoopbackResult, 1),
-		RedirectURI: fmt.Sprintf("http://%s%s", ln.Addr().String(), path),
+		RedirectURI: fmt.Sprintf("http://127.0.0.1:%d%s", boundPort, path),
 		expectState: expectState,
 	}
 	mux := http.NewServeMux()
@@ -226,10 +231,19 @@ type TokenResponse struct {
 type ExchangeParams struct {
 	TokenEndpoint string
 	ClientID      string
+	ClientSecret  string
 	Code          string
 	RedirectURI   string
 	CodeVerifier  string
 	Resource      string
+}
+
+// clientSecretBasicHeader builds RFC 6749 section 2.3.1 client_secret_basic
+// credentials. Each credential is form-encoded before the pair is joined and
+// base64-encoded; the Givmo authorization server URL-decodes both on receipt.
+func clientSecretBasicHeader(clientID, clientSecret string) string {
+	credentials := url.QueryEscape(clientID) + ":" + url.QueryEscape(clientSecret)
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(credentials))
 }
 
 // BuildExchangeForm builds the x-www-form-urlencoded body for the token
@@ -260,6 +274,9 @@ func ExchangeCode(ctx context.Context, client *http.Client, p ExchangeParams) (*
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	if p.ClientSecret != "" {
+		req.Header.Set("Authorization", clientSecretBasicHeader(p.ClientID, p.ClientSecret))
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

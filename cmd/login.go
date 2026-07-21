@@ -17,6 +17,7 @@ import (
 var (
 	loginNoBrowser bool
 	loginTimeout   time.Duration
+	loginPort      int
 )
 
 func newLoginCmd() *cobra.Command {
@@ -26,9 +27,19 @@ func newLoginCmd() *cobra.Command {
 		Long: `Authenticate the CLI to Givmo.
 
 Interactive (default): runs the OAuth 2.0 authorization-code + PKCE (S256) flow
-against Givmo Connect. The CLI opens your browser to the authorize URL and
-listens on a localhost loopback for the redirect, then exchanges the code for a
-consumer token scoped to:
+as a confidential client against Givmo Connect. The CLI binds
+127.0.0.1:<port>, opens your browser to the authorize URL, and receives the
+redirect at http://127.0.0.1:<port>/callback. That exact redirect URI must be
+registered for your Givmo OAuth client. The default port 8765 matches the
+first-party Givmo connector client.
+
+The client secret is read from GIVMO_CLIENT_SECRET first, then from the OS
+keychain or 0600 file store. It is never accepted as a flag. A secret sourced
+from the environment is stored after the first successful login. The Givmo
+authorization server currently supports confidential clients only; dynamic and
+public client registration are future capabilities.
+
+The resulting consumer token is scoped to:
   givmo.donations.read  givmo.receipts.read
   givmo.giving_summary.read  givmo.donation_intents.create
 
@@ -38,6 +49,11 @@ and the key is stored for the active profile.
 Tokens are stored in the OS keychain when available, else a 0600 file under
 ~/.givmo. Tokens are never logged and never appear in --json output.`,
 		RunE: func(c *cobra.Command, _ []string) error {
+			if loginPort < 1 || loginPort > 65535 {
+				return output.New(output.ExitValidation,
+					fmt.Sprintf("login callback port %d is outside valid range 1-65535", loginPort),
+					"Pass `--port <N>` with a value from 1 through 65535 whose callback redirect URI is registered for your Givmo OAuth client.")
+			}
 			app, err := resolveAppCtx()
 			if err != nil {
 				return err
@@ -51,6 +67,7 @@ Tokens are stored in the OS keychain when available, else a 0600 file under
 	}
 	cmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false, "print the authorize URL instead of opening a browser")
 	cmd.Flags().DurationVar(&loginTimeout, "timeout", 3*time.Minute, "how long to wait for the browser callback")
+	cmd.Flags().IntVar(&loginPort, "port", 8765, "loopback callback port: binds 127.0.0.1:<port>; http://127.0.0.1:<port>/callback must be registered for your Givmo OAuth client (default 8765 matches the first-party Givmo connector client)")
 	return cmd
 }
 
@@ -81,6 +98,17 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	ctx, cancel := context.WithTimeout(parent, loginTimeout)
 	defer cancel()
 
+	clientSecret, secretSource, err := auth.ResolveClientSecret(app.Store, app.Profile.Name)
+	if err != nil {
+		return output.New(output.ExitGeneric, "could not resolve OAuth client secret: "+err.Error(),
+			"Check access to the OS keychain or 0600 Givmo credential store, then re-run `givmo login`.")
+	}
+	if clientSecret == "" {
+		return output.New(output.ExitAuth,
+			"the Givmo authorization server requires a confidential client secret and none was found",
+			"Set GIVMO_CLIENT_SECRET to your registered client's secret and re-run `givmo login`; dynamic and public client registration are not yet supported by the Givmo authorization server.")
+	}
+
 	app.prodBanner("logging in")
 
 	// 1) Discover the authorization server via the MCP host's protected-resource
@@ -105,10 +133,10 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	}
 
 	// 3) Start the loopback listener.
-	listener, err := auth.NewLoopbackListener("/callback", pk.State)
+	listener, err := auth.NewLoopbackListener("/callback", pk.State, loginPort)
 	if err != nil {
 		return output.New(output.ExitGeneric, "could not start loopback listener: "+err.Error(),
-			"Ensure localhost binding is permitted (no restrictive firewall on 127.0.0.1).")
+			fmt.Sprintf("Free port %d if another process is using it, or pass `--port <N>` where http://127.0.0.1:<N>/callback is registered for your Givmo OAuth client.", loginPort))
 	}
 	defer listener.Close()
 	listener.Serve()
@@ -147,6 +175,7 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	tok, err := auth.ExchangeCode(ctx, app.httpClient(), auth.ExchangeParams{
 		TokenEndpoint: asMeta.TokenEndpoint,
 		ClientID:      auth.ClientID,
+		ClientSecret:  clientSecret,
 		Code:          res.Code,
 		RedirectURI:   listener.RedirectURI,
 		CodeVerifier:  pk.Verifier,
@@ -155,6 +184,11 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	if err != nil {
 		return output.New(output.ExitAuth, "token exchange failed: "+err.Error(),
 			"Confirm the active profile's auth_base is correct (`givmo config view`) and the Connect endpoint is live.")
+	}
+	if secretSource == "env" {
+		if err := app.Store.SaveClientSecret(app.Profile.Name, clientSecret); err != nil {
+			fmt.Fprintln(app.Printer.Err, "warning: OAuth client secret could not be stored for future logins")
+		}
 	}
 
 	// 8) Persist the credential.

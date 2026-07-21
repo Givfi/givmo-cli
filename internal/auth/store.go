@@ -17,12 +17,16 @@ import (
 // are stored. The account is the profile name.
 const keychainService = "io.givmo.cli"
 
+// clientSecretKeychainService is distinct from the credential service so the
+// OAuth client secret is never serialized into the Credential JSON blob.
+const clientSecretKeychainService = "io.givmo.cli.client-secret"
+
 // ErrNoCredential means no credential is stored for the requested profile.
 var ErrNoCredential = errors.New("no stored credential for profile")
 
-// Store persists per-profile Credentials. It prefers the OS keychain (macOS
-// `security`) when available and falls back to a 0600 file under ~/.givmo.
-// Secrets never touch logs or --json output.
+// Store persists per-profile credentials and OAuth client secrets. It prefers
+// the OS keychain (macOS `security`) when available and falls back to separate
+// 0600 files under ~/.givmo. Secrets never touch logs or --json output.
 type Store struct {
 	// useKeychain is set when the platform keychain backend is usable.
 	useKeychain bool
@@ -78,6 +82,25 @@ func (s *Store) Save(c *Credential) error {
 	return s.fileSet(c.Profile, data)
 }
 
+// SaveClientSecret stores the confidential OAuth client secret separately from
+// the profile's Credential record.
+func (s *Store) SaveClientSecret(profile, secret string) error {
+	if profile == "" {
+		return errors.New("client secret is missing a profile")
+	}
+	if s.useKeychain {
+		return s.keychainSetService(clientSecretKeychainService, profile, []byte(secret))
+	}
+	p := s.clientSecretPath(profile)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(p, []byte(secret), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(p, 0o600)
+}
+
 // Load returns the credential for a profile, or ErrNoCredential.
 func (s *Store) Load(profile string) (*Credential, error) {
 	var data []byte
@@ -97,26 +120,58 @@ func (s *Store) Load(profile string) (*Credential, error) {
 	return &c, nil
 }
 
-// Delete removes the credential for a profile. Deleting a missing credential is
-// not an error (idempotent logout).
+// LoadClientSecret returns the confidential OAuth client secret for a profile.
+// An absent secret returns an empty string without an error.
+func (s *Store) LoadClientSecret(profile string) (string, error) {
+	var data []byte
+	var err error
+	if s.useKeychain {
+		data, err = s.keychainGetService(clientSecretKeychainService, profile)
+	} else {
+		data, err = os.ReadFile(s.clientSecretPath(profile))
+	}
+	if errors.Is(err, ErrNoCredential) || errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// Delete clears all stored auth material for a profile. Deleting missing auth
+// material is not an error (idempotent logout).
 func (s *Store) Delete(profile string) error {
 	if s.useKeychain {
-		return s.keychainDelete(profile)
+		return errors.Join(
+			s.keychainDeleteService(keychainService, profile),
+			s.keychainDeleteService(clientSecretKeychainService, profile),
+		)
 	}
-	return s.fileDelete(profile)
+	return errors.Join(
+		s.fileDelete(profile),
+		s.fileClientSecretDelete(profile),
+	)
 }
 
 // ---- file backend -----------------------------------------------------------
 
 func (s *Store) credPath(profile string) string {
 	// One file per profile so profiles are isolated. Name is sanitized.
-	safe := strings.Map(func(r rune) rune {
+	return filepath.Join(s.fileDir, "credentials", sanitizedProfile(profile)+".json")
+}
+
+func (s *Store) clientSecretPath(profile string) string {
+	return filepath.Join(s.fileDir, "credentials", sanitizedProfile(profile)+".client-secret")
+}
+
+func sanitizedProfile(profile string) string {
+	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
 			return r
 		}
 		return '_'
 	}, profile)
-	return filepath.Join(s.fileDir, "credentials", safe+".json")
 }
 
 func (s *Store) fileSet(profile string, data []byte) error {
@@ -147,13 +202,25 @@ func (s *Store) fileDelete(profile string) error {
 	return err
 }
 
+func (s *Store) fileClientSecretDelete(profile string) error {
+	err := os.Remove(s.clientSecretPath(profile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // ---- macOS keychain backend (shells to `security`) --------------------------
 
 func (s *Store) keychainSet(profile string, data []byte) error {
+	return s.keychainSetService(keychainService, profile, data)
+}
+
+func (s *Store) keychainSetService(service, profile string, data []byte) error {
 	// -U updates if present; -w takes the secret as the password value.
 	cmd := exec.Command("security", "add-generic-password",
 		"-a", profile,
-		"-s", keychainService,
+		"-s", service,
 		"-w", string(data),
 		"-U",
 	)
@@ -164,9 +231,13 @@ func (s *Store) keychainSet(profile string, data []byte) error {
 }
 
 func (s *Store) keychainGet(profile string) ([]byte, error) {
+	return s.keychainGetService(keychainService, profile)
+}
+
+func (s *Store) keychainGetService(service, profile string) ([]byte, error) {
 	cmd := exec.Command("security", "find-generic-password",
 		"-a", profile,
-		"-s", keychainService,
+		"-s", service,
 		"-w",
 	)
 	out, err := cmd.Output()
@@ -177,10 +248,10 @@ func (s *Store) keychainGet(profile string) ([]byte, error) {
 	return []byte(strings.TrimRight(string(out), "\n")), nil
 }
 
-func (s *Store) keychainDelete(profile string) error {
+func (s *Store) keychainDeleteService(service, profile string) error {
 	cmd := exec.Command("security", "delete-generic-password",
 		"-a", profile,
-		"-s", keychainService,
+		"-s", service,
 	)
 	if err := cmd.Run(); err != nil {
 		// Absent item -> treat as already-deleted (idempotent).

@@ -6,9 +6,9 @@
 //   - Tokens are stored in the OS keychain when available, else in a 0600 file
 //     under ~/.givmo. They are NEVER written to logs and NEVER included in
 //     --json output.
-//   - The CLI is a public client (no client secret): PKCE is the proof-of-
-//     possession mechanism, and the redirect is a loopback listener per the
-//     OAuth 2.0 for Native Apps BCP (RFC 8252).
+//   - The CLI authenticates as a confidential client and also uses PKCE as a
+//     proof-of-possession mechanism. The redirect uses a registered loopback
+//     listener URI.
 package auth
 
 import (
