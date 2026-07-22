@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -150,10 +149,11 @@ func TestNewLoopbackListener_RedirectAndOccupiedPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoopbackListener ephemeral: %v", err)
 	}
-	if matched := regexp.MustCompile(`^http://127\.0\.0\.1:\d+/callback$`).MatchString(ephemeral.RedirectURI); !matched {
-		t.Errorf("ephemeral RedirectURI = %q", ephemeral.RedirectURI)
-	}
 	port := ephemeral.ln.Addr().(*net.TCPAddr).Port
+	wantEphemeralRedirect := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	if ephemeral.RedirectURI != wantEphemeralRedirect {
+		t.Errorf("ephemeral RedirectURI = %q, want %q", ephemeral.RedirectURI, wantEphemeralRedirect)
+	}
 	if err := ephemeral.ln.Close(); err != nil {
 		t.Fatalf("close ephemeral listener: %v", err)
 	}

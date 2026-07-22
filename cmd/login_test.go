@@ -39,6 +39,17 @@ func TestLoginCommand_RejectsInvalidPort(t *testing.T) {
 	}
 }
 
+func TestLoginCommand_DefaultPortIsEphemeral(t *testing.T) {
+	cmd := newLoginCmd()
+	portFlag := cmd.Flags().Lookup("port")
+	if portFlag == nil {
+		t.Fatal("port flag not found")
+	}
+	if got := portFlag.DefValue; got != "0" {
+		t.Errorf("port default = %q, want %q", got, "0")
+	}
+}
+
 func (failingDiscoverer) AuthServer(context.Context, string) (*auth.AuthServerMetadata, error) {
 	return nil, errors.New("discovery down")
 }
