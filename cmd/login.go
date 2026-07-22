@@ -27,11 +27,13 @@ func newLoginCmd() *cobra.Command {
 		Long: `Authenticate the CLI to Givmo.
 
 Interactive (default): runs the OAuth 2.0 authorization-code + PKCE (S256) flow
-as a confidential client against Givmo Connect. The CLI binds
-127.0.0.1:<port>, opens your browser to the authorize URL, and receives the
-redirect at http://127.0.0.1:<port>/callback. That exact redirect URI must be
-registered for your Givmo OAuth client. The default port 8765 matches the
-first-party Givmo connector client.
+as a confidential client against Givmo Connect. The CLI binds a loopback
+listener on 127.0.0.1 using an OS-assigned ephemeral port by default (RFC 8252
+loopback redirect), opens your browser to the authorize URL, and receives the
+redirect at http://127.0.0.1:<port>/callback for whichever port it bound. The
+Givmo authorization server accepts any loopback port. Pass --port <N> to pin it
+for an authorization server that lacks loopback port flexibility or a
+registered redirect that fixes the port.
 
 GIVMO_CLIENT_ID overrides the built-in first-party client id (givmo-cli). Set it
 together with GIVMO_CLIENT_SECRET to authenticate as your own registered
@@ -51,7 +53,7 @@ and the key is stored for the active profile.
 Tokens are stored in the OS keychain when available, else a 0600 file under
 ~/.givmo. Tokens are never logged and never appear in --json output.`,
 		RunE: func(c *cobra.Command, _ []string) error {
-			if loginPort < 1 || loginPort > 65535 {
+			if c.Flags().Changed("port") && (loginPort < 1 || loginPort > 65535) {
 				return output.New(output.ExitValidation,
 					fmt.Sprintf("login callback port %d is outside valid range 1-65535", loginPort),
 					"Pass `--port <N>` with a value from 1 through 65535 whose callback redirect URI is registered for your Givmo OAuth client.")
@@ -69,7 +71,7 @@ Tokens are stored in the OS keychain when available, else a 0600 file under
 	}
 	cmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false, "print the authorize URL instead of opening a browser")
 	cmd.Flags().DurationVar(&loginTimeout, "timeout", 3*time.Minute, "how long to wait for the browser callback")
-	cmd.Flags().IntVar(&loginPort, "port", 8765, "loopback callback port: binds 127.0.0.1:<port>; http://127.0.0.1:<port>/callback must be registered for your Givmo OAuth client (default 8765 matches the first-party Givmo connector client)")
+	cmd.Flags().IntVar(&loginPort, "port", 0, "pin the loopback callback port for an authorization server that lacks RFC 8252 loopback port flexibility or a registered redirect that fixes the port (default: OS-assigned ephemeral port)")
 	return cmd
 }
 
@@ -138,8 +140,11 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	// 3) Start the loopback listener.
 	listener, err := auth.NewLoopbackListener("/callback", pk.State, loginPort)
 	if err != nil {
-		return output.New(output.ExitGeneric, "could not start loopback listener: "+err.Error(),
-			fmt.Sprintf("Free port %d if another process is using it, or pass `--port <N>` where http://127.0.0.1:<N>/callback is registered for your Givmo OAuth client.", loginPort))
+		remediation := "Ensure localhost binding is permitted (no restrictive firewall on 127.0.0.1)."
+		if loginPort != 0 {
+			remediation = fmt.Sprintf("Free port %d if another process is using it, or pass `--port <N>` where http://127.0.0.1:<N>/callback is registered for your Givmo OAuth client.", loginPort)
+		}
+		return output.New(output.ExitGeneric, "could not start loopback listener: "+err.Error(), remediation)
 	}
 	defer listener.Close()
 	listener.Serve()
