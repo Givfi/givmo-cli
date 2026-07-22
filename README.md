@@ -179,10 +179,12 @@ Precedence: environment variables > `~/.givmo/config.json` > built-in defaults.
 
 ### Interactive login
 
-`givmo login` binds `127.0.0.1:8765` by default and uses the exact redirect URI
-`http://127.0.0.1:8765/callback`. To use another callback port, pass `--port N`;
-`http://127.0.0.1:N/callback` must be registered for your Givmo OAuth client.
-Port 8765 matches the registered first-party Givmo connector client.
+`givmo login` binds a loopback listener on `127.0.0.1` using an OS-assigned
+ephemeral port by default (RFC 8252 loopback redirect). The redirect URI is
+`http://127.0.0.1:<port>/callback` for whichever port it bound, and the Givmo
+authorization server accepts any loopback port. Pass `--port N` to pin the port
+for an authorization server that lacks loopback port flexibility or a
+registered redirect that fixes it.
 
 Interactive login requires a confidential OAuth client secret.
 `GIVMO_CLIENT_ID` overrides the built-in first-party `givmo-cli` client id; set
