@@ -49,13 +49,13 @@ and it is load-bearing for security: it is *why* several of the worst-case
 outcomes below collapse into "a charitable gift reached a verified charity"
 rather than "an attacker got paid."
 
-An **internal operator tier** also rides the same server. When enabled, it is how
-Givmo's own back-office agent (the exec-OS) administers GCF's grant money under
-audit. It is never directory-listed and never reachable by a consumer or partner
-principal, and it is **dark in production and fails closed until an operator
-identity is configured** (production go-live is a future, operator-gated step).
-Its safety case is treated separately in §11 because it is the tier that moves
-GCF's *own* money — which the consumer surface never does.
+An **internal operator tier** also rides the same server. It is how Givmo's own
+back-office agent administers GCF's grant money under audit, and it is operating
+in production with a configured operator identity. It is never directory-listed
+and never reachable by a consumer or partner principal; by design, it **fails
+closed whenever no operator identity is configured**. Its safety case is treated
+separately in §11 because it is the tier that moves GCF's *own* money — which
+the consumer surface never does.
 
 ---
 
@@ -213,7 +213,9 @@ attempt to move money.
   access**.
 - **Anti-phishing consent screen.** The consent screen is Givmo-controlled and
   **names the requesting agent truthfully** — see §4.8; defeating consent-screen
-  impersonation is that screen's explicit job.
+  impersonation is that screen's explicit job. The branded consent screen is
+  certified and live on staging; production consent-page activation is pending
+  a release train.
 
 *(PCI-DSS control level and the broader security-attestation program are an
 as-built security matter and are out of scope for this document's structural
@@ -247,7 +249,9 @@ a fundable recipient.
 - **Good-standing default.** `search_charities` defaults to good-standing /
   ACTIVE organizations; research-only or non-soliciting orgs are returned only
   behind an explicit flag and get **no donate chips**, re-enforced at render
-  emission.
+  emission. Catalog and search tools suppress charities removed under Cal. Gov.
+  Code §12599.9(f)(2)(C) on the consumer and public tiers; the internal tier
+  retains visibility for audit.
 
 **Legal framing (important nuance).** A grant to a fraudulent or non-qualified
 recipient is a **§ 4966 taxable-distribution / operational-control /
@@ -299,11 +303,12 @@ a payout URL dressed up as an authoritative action target.
   receipt registry** for all legal copy. The manifest feeds the
   **discovery/display layer only.** (See the manifest spec's `SPEC.md` §7.3 and
   §7.6 and its Security Considerations.)
-- **The corpus itself is grounded only on non-hostile primary data.** The AI
-  charity research corpus is built from IRS-direct public-domain filings and
-  Wikidata (CC0) — not charity-supplied or license-restricted third-party data —
-  and each field carries a source label so an LLM-summarized-from-website field
-  is never mistaken for an IRS-filed fact.
+- **The planned corpus is designed to be grounded only on non-hostile primary
+  data.** The AI charity research corpus will be built from IRS-direct
+  public-domain filings and Wikidata (CC0) — not charity-supplied or
+  license-restricted third-party data — and each field will carry a source
+  label so an LLM-summarized-from-website field is never mistaken for an
+  IRS-filed fact.
 
 **Two distinct harms this addresses.** (i) If manifest text drove *payee routing
 or eligibility*, it could steer a grant to a wrong/non-qualified recipient (a
@@ -430,7 +435,9 @@ money through Givmo; or an agent silently presents itself as "the donor."
 - **Truthful consent screen (anti-lookalike is its job).** The Givmo-controlled
   consent screen names the requesting agent truthfully and grants are
   scope-subset only. Defeating look-alike / impersonation of the requesting agent
-  is the consent screen's explicit purpose.
+  is the consent screen's explicit purpose. The branded consent screen is
+  certified and live on staging; production consent-page activation is pending
+  a release train.
 - **Server-side identity injection, cryptographically bound.** The handler's
   identity principal is injected **server-side from the OAuth credential — never
   passed as a tool parameter** — so an agent cannot assert an identity it was not
@@ -569,14 +576,14 @@ model exists to prevent:
 
 ## 11. The internal operator tier — its own deterministic money-safety case
 
-Separate from the consumer surface, when enabled, Givmo's own back-office agent
-(the exec-OS) uses the internal tier to administer **GCF's own grant money**.
-Because this tier moves GCF's money — unlike the consumer surface, where the agent
-never does — its safety case is stated explicitly here and is **NOT MCP
-authentication alone.** **The tier is dark in production and fails closed until an
-operator identity is configured;** production go-live is a future, operator-gated
-step. The design and its safety case are stated in present tense below;
-deployment is roadmap.
+Separate from the consumer surface, Givmo's own back-office agent uses the
+internal tier to administer **GCF's own grant money**. Because this tier moves
+GCF's money — unlike the consumer surface, where the agent never does — its
+safety case is stated explicitly here and is **NOT MCP authentication alone.**
+**The tier is operating in production under audit:** the grant-ops and
+DAF-transfer tool families are live, every call is audited, the
+operator-identity gate fails closed when unconfigured, and a
+credential-revocation drill passed on 2026-07-22.
 
 - **The MCP scopes are transport, not the money-safety case.** Internal scopes
   govern *what the agent may read or write*; they do **not** decide *whether
@@ -584,15 +591,15 @@ deployment is roadmap.
 - **The money-safety case is a deterministic floor** that bounds every internal
   disbursement, independent of anything the agent decides:
   - **Per-grant caps.**
-  - **A payee allowlist** keyed on `(charity_id, EIN, recipient_id)` — money can
-    only reach a pre-vetted payee.
+  - **A payee allowlist** keyed on `(charity_id, EIN, recipient_id)` — money
+    can only reach a pre-vetted payee.
   - **Decorrelated second-model review** of the disbursement.
   - **A credential-revocation kill switch** — revoking the token disables the
     principal with no redeploy.
   - **An immutable audit ledger** — every internal call is recorded to an
-    append-only ledger; a scope-gated logs-tail read API exposes it to the
-    operator (enabled when the `internal.audit.read` scope is granted at
-    credential mint).
+    append-only ledger; a scope-gated logs-tail read API is live in staging and
+    production, requires the `internal.audit.read` scope, and is
+    keyset-paginated with an `audience` filter.
 - **Least privilege and fail-closed.** Read scope is broad-but-low-risk; **write
   scope stays narrow and per-lane** (a money-write authority is added per lane,
   the same operator-gated discipline as adding a new charity payee). When the
@@ -652,10 +659,10 @@ program's representations *about itself*, not only its giving copy. Accordingly:
 
 ## 13. Version & provenance
 
-- **Document version:** v1.0 — 2026-07-06.
-- **Applies to:** the Givmo MCP surface v1 (Rung 1 live; Rungs 2–3 gated future
-  phases). Companion artifacts: the `donate.json` manifest spec v1.0 and the
-  `givmo` CLI, both in this bundle.
+- **Document version:** v1.1 — 2026-07-24.
+- **Applies to:** the Givmo MCP surface v1 (Rung 1 and the internal operator
+  tier live in production; Rungs 2–3 gated future phases). Companion artifacts:
+  the `donate.json` manifest spec v1.0 and the `givmo` CLI, both in this bundle.
 - **Legal substrate:** the entity/DAF/regulatory characterizations in this
   document track GCF's actual legal posture as determined by Givmo's counsel
   function. This is a general program description, not advice.

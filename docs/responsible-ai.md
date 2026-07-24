@@ -122,7 +122,9 @@ The human is always in control of what an agent may do on their behalf:
 
 - **The consent screen tells the truth about scopes** and **names the requesting
   agent truthfully** — anti-lookalike identification is the consent screen's
-  explicit job (Threat Model §4.8).
+  explicit job (Threat Model §4.8). The branded consent screen is certified and
+  live on staging; production consent-page activation is pending a release
+  train.
 - **Narrowest scope that works.** The four consumer scopes are the exact ceiling
   of a consumer grant; grants are scope-subset; widening what an agent can do is
   never a silent change.
@@ -181,10 +183,11 @@ safe path the easy path.
 
 ## 8. Version & provenance
 
-- **Document version:** v1.0 — 2026-07-06.
-- **Applies to:** the Givmo MCP surface v1 (Rung 1 live; Rungs 2–3 and deep
-  research gated). Companion artifacts: the `donate.json` manifest spec v1.0 and
-  the `givmo` CLI, both in this bundle.
+- **Document version:** v1.1 — 2026-07-24.
+- **Applies to:** the Givmo MCP surface v1 (Rung 1 and the internal operator
+  tier live in production; Rungs 2–3 and deep research gated). Companion
+  artifacts: the `donate.json` manifest spec v1.0 and the `givmo` CLI, both in
+  this bundle.
 - **Companion:** [Threat Model](./threat-model.md).
 - This is a general program description, not legal or tax advice (Threat Model
   §12).
