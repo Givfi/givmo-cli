@@ -37,9 +37,10 @@ agent operator.
 | `2` | usage error | you built the command wrong — fix flags/args |
 | `3` | auth required/failed | run `givmo login` (or set `GIVMO_API_KEY`) |
 | `4` | not found | resolve the id first via a `search`/`list` command |
-| `5` | rate limited | back off and retry |
+| `5` | rate limited, or busy with nothing changed | back off and retry |
 | `6` | network / endpoint not enabled | the endpoint may be dark in this env; do not loop hard |
 | `7` | validation / rejected manifest | fix the input; for manifests, honor `rejected_claims` |
+| `8` | outcome unknown: the call may have run | read the current state before retrying; repeat the call only where the error says a same-arguments retry is safe |
 
 ## Authentication
 

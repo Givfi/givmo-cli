@@ -200,3 +200,37 @@ func TestServe_ParseErrorFraming(t *testing.T) {
 		t.Fatalf("expected parse error, got %+v", resps)
 	}
 }
+
+// TestServe_ToolsCallForwardsRefusalVerbatim pins that a refusal reaches the agent
+// IDE exactly as the server sent it: isError, the text, and every structuredContent
+// field a client branches on (the keys and values are the server's; the codes and
+// text are illustrative).
+func TestServe_ToolsCallForwardsRefusalVerbatim(t *testing.T) {
+	refusal := `{"content":[{"type":"text","text":"ExampleOutcomeUnknown: the operation was sent and did not answer. IT MAY HAVE COMPLETED — the outcome is unknown."}],` +
+		`"structuredContent":{"source":"example_family","refusal":"ExampleOutcomeUnknown","outcome":"unknown","attempted":true,"safe_to_retry":false},` +
+		`"isError":true}`
+	remote := &fakeRemote{callResult: json.RawMessage(refusal)}
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"example_tool","arguments":{}}}` + "\n")
+	var out bytes.Buffer
+	s := NewServer(Config{In: in, Out: &out, Remote: remote})
+	if err := s.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resps := decodeResponses(t, out.Bytes())
+	if len(resps) != 1 || resps[0].Error != nil {
+		t.Fatalf("a refusal is a tool result, not a JSON-RPC error: %+v", resps)
+	}
+	got, _ := json.Marshal(resps[0].Result)
+	var want, have any
+	if err := json.Unmarshal([]byte(refusal), &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(got, &have); err != nil {
+		t.Fatal(err)
+	}
+	wantJSON, _ := json.Marshal(want)
+	haveJSON, _ := json.Marshal(have)
+	if !bytes.Equal(wantJSON, haveJSON) {
+		t.Errorf("refusal not forwarded verbatim:\n got %s\nwant %s", haveJSON, wantJSON)
+	}
+}

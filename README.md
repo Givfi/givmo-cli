@@ -134,9 +134,10 @@ Scripts and AI agents can branch on these deterministically (defined once in
 | `2` | usage error (bad flags/args) | see `givmo <cmd> --help` |
 | `3` | auth required / failed | run `givmo login` |
 | `4` | not found | check the id via a `search`/`list` |
-| `5` | rate limited | back off, honor `Retry-After` |
+| `5` | rate limited, or busy with nothing changed | back off, honor `Retry-After`, then retry |
 | `6` | network error / endpoint not enabled | check connectivity / profile |
 | `7` | validation / rejected manifest | fix input; treat manifest as untrusted |
+| `8` | outcome unknown: the call may have run | read the current state before retrying; retry with the same arguments only where the error says that is safe |
 
 ## Error envelope
 
@@ -160,6 +161,10 @@ included whenever the response carried one — extracted from the `X-Request-Id`
 header or either backend error shape (the root `{errors:[…]}` envelope and the
 Connect `{error:{…}}` envelope are both understood). A corrective MCP tool result
 (e.g. `not_found`, an out-of-range tax year) is mapped to the matching exit code.
+A refused MCP tool call is mapped by the fields the server states in its
+`structuredContent`, not by its refusal code: a call the server says may have run
+(`outcome: "unknown"`) exits `8`, and one it says is safe to retry
+(`safe_to_retry: true`) exits `5`.
 
 ## Configuration
 

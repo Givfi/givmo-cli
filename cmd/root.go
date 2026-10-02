@@ -45,9 +45,10 @@ STABLE EXIT CODES (scripts/agents can branch on these):
   2  usage error (bad flags/args)
   3  auth required/failed        -> run 'givmo login'
   4  not found
-  5  rate limited
+  5  rate limited, or busy       -> back off, then retry
   6  network error / endpoint not enabled
   7  validation / rejected manifest
+  8  outcome unknown             -> the call may have run; read before retrying
 
 ERROR ENVELOPE: with --json, errors render as
   {"error":{"code","message","remediation","request_id","doc_url}}

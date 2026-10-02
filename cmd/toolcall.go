@@ -23,8 +23,8 @@ func (a *appCtx) mcpEndpoint() string {
 }
 
 // mcpToolResult is the subset of an MCP CallToolResult the CLI reads: the
-// structured payload (a dict on success), the text content (always present; the
-// only payload when isError), and the error flag.
+// structured payload (a dict on success, a refusal's machine-readable fields on
+// an error), the text content (always present), and the error flag.
 type mcpToolResult struct {
 	Content []struct {
 		Type string `json:"type"`
@@ -88,10 +88,10 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 			"could not decode the MCP tool result: "+uerr.Error(),
 			"The remote returned an unexpected shape; retry, and report to Givmo support if it persists.")
 	}
-	// isError => a transport/dispatch tool error (tool_not_found, invalid arguments,
-	// or a refused write). Only the text content is populated.
+	// isError => a dispatch error (tool_not_found, invalid arguments) or a refusal.
+	// The text is always populated; a refusal may also carry structuredContent.
 	if tr.IsError {
-		return nil, toolErrorFromText(mcpTextContent(tr), name)
+		return nil, toolErrorFromResult(tr, name)
 	}
 	// Prefer the structured payload; fall back to parsing the text content as JSON.
 	payload := tr.StructuredContent
@@ -171,14 +171,81 @@ func leadingToken(text string) string {
 	return text[:i]
 }
 
+// toolRefusal is the machine-readable part of a refusal: the fields of an isError
+// result's structuredContent the CLI branches on. The server states there what a
+// caller may do next, so the CLI reads its verdict instead of a list of refusal
+// codes, and a refusal code it has never seen maps the same way. Every field is
+// optional.
+type toolRefusal struct {
+	// Refusal is the refusal's stable code.
+	Refusal string `json:"refusal"`
+	// SafeToRetry is the server's verdict on repeating the call as it was made.
+	SafeToRetry *bool `json:"safe_to_retry"`
+	// Outcome is "not_applied" when the call did not run and "unknown" when it
+	// may have.
+	Outcome string `json:"outcome"`
+	// Attempted says whether the call was sent on to the operation behind the tool.
+	Attempted *bool `json:"attempted"`
+}
+
+// mayHaveRun reports whether the refusal says the call may have run: its outcome
+// is unknown, or it was attempted and is not said to have been left unapplied.
+func (r toolRefusal) mayHaveRun() bool {
+	if r.Outcome == "unknown" {
+		return true
+	}
+	return r.Attempted != nil && *r.Attempted && r.Outcome != "not_applied"
+}
+
+// retrySafe reports whether the server says repeating the call is safe.
+func (r toolRefusal) retrySafe() bool {
+	return r.SafeToRetry != nil && *r.SafeToRetry
+}
+
+// toolErrorFromResult maps an isError tool result to the CLI envelope, by its
+// structured fields first:
+//   - a call that may have run → ExitOutcomeUnknown: read before retrying, and
+//     repeat it only where the server says a same-arguments retry is safe;
+//   - a call the server says is safe to retry (turned away as busy, never sent,
+//     or a read that changed nothing) → ExitRateLimited: back off, then retry;
+//   - anything else keeps the code-based mapping below, keyed on the structured
+//     refusal code when there is one, else on the text's leading code.
+func toolErrorFromResult(tr mcpToolResult, name string) *output.Error {
+	text := strings.TrimSpace(mcpTextContent(tr))
+	if text == "" {
+		text = "the MCP tool '" + name + "' returned an error"
+	}
+	var r toolRefusal
+	if len(tr.StructuredContent) > 0 {
+		// A field of the wrong type stays unset, and an unset field claims nothing.
+		_ = json.Unmarshal(tr.StructuredContent, &r)
+	}
+	switch {
+	case r.mayHaveRun():
+		remediation := "Do not retry blindly: read the current state first (with the matching read or list command), then act on what it says."
+		if r.retrySafe() {
+			remediation = "The server says repeating the call with exactly the same arguments is safe, but the first call may still land: read the current state before changing it again."
+		}
+		return output.New(output.ExitOutcomeUnknown,
+			"the MCP tool '"+name+"' may have run; its outcome is unknown: "+text,
+			remediation)
+	case r.retrySafe():
+		return output.New(output.ExitRateLimited,
+			"the MCP tool '"+name+"' did not complete: "+text,
+			"The server says a retry is safe: wait briefly, then retry.")
+	}
+	return toolErrorFromText(text, name, r.Refusal)
+}
+
 // toolErrorFromText maps an isError tool result (a raised dispatch error or a refused
-// write) to the CLI envelope, keying on the STABLE leading error code the backend
-// renders — never on human message wording. `tool_not_found` is the one genuinely
+// write) to the CLI envelope, keying on the STABLE error code the backend sends — the
+// structured refusal code when the result carries one, else the code it prefixes onto
+// the text — never on human message wording. `tool_not_found` is the one genuinely
 // auth-shaped code (a tool the grant's scope/audience does not include is reported
 // identically to one that does not exist at all), so it → ExitAuth. Every
 // donation-intent rejection and `invalid_arguments` is a request/domain refusal the
 // caller fixes by changing inputs → ExitValidation with the server's message.
-func toolErrorFromText(text, name string) *output.Error {
+func toolErrorFromText(text, name, refusal string) *output.Error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		text = "the MCP tool '" + name + "' returned an error"
@@ -194,11 +261,13 @@ func toolErrorFromText(text, name string) *output.Error {
 			"Adjust the request per the message and retry; this is a request/validation problem, not an authentication failure.")
 	}
 
-	switch code := leadingToken(text); {
-	case code == "tool_not_found":
-		return authError()
-	case code == "invalid_arguments" || donationRejectionCodes[code]:
-		return validationError()
+	for _, code := range []string{refusal, leadingToken(text)} {
+		switch {
+		case code == "tool_not_found":
+			return authError()
+		case code == "invalid_arguments" || donationRejectionCodes[code]:
+			return validationError()
+		}
 	}
 
 	// No recognized code prefix: fall back to a conservative heuristic for auth-shaped

@@ -299,3 +299,228 @@ func TestCallTool_ConsumerForwardsBearer(t *testing.T) {
 		t.Errorf("tax_year not forwarded: %+v", cap.args)
 	}
 }
+
+// refusalResult is an isError CallToolResult carrying a refusal's text and its
+// structuredContent, the shape the server sends when it refuses a call.
+func refusalResult(text string, structured map[string]any) map[string]any {
+	return map[string]any{
+		"content":           textBlock(text),
+		"structuredContent": structured,
+		"isError":           true,
+	}
+}
+
+// TestCallTool_RefusalMapsByStructuredFields pins the mapping of a refusal by the
+// fields the server states, never by its code: the structuredContent keys and values
+// below are the server's own (safe_to_retry, outcome, attempted, retry_safety,
+// budget_seconds), while the refusal codes, sources and texts are illustrative. A
+// code the CLI has never seen maps by the same fields.
+func TestCallTool_RefusalMapsByStructuredFields(t *testing.T) {
+	cases := []struct {
+		name       string
+		text       string
+		structured map[string]any
+		wantExit   int
+		wantRemedy string
+	}{
+		{
+			name: "busy read: nothing sent, safe to retry",
+			text: "ExampleBusy: the read was not sent: this kind of tool already has as many calls in flight on this server as it may hold, and none finished within 5s. A read changes nothing, so it is safe to retry, preferably after a short wait.",
+			structured: map[string]any{
+				"source": "example_family", "refusal": "ExampleBusy", "safe_to_retry": true,
+			},
+			wantExit:   output.ExitRateLimited,
+			wantRemedy: "retry",
+		},
+		{
+			name: "busy write: not applied, not attempted",
+			text: "ExampleBusy: the operation was not sent, so it did not run: this kind of tool already has as many calls in flight on this server as it may hold, and none finished within 5s. It is safe to retry, preferably after a short wait.",
+			structured: map[string]any{
+				"source": "example_family", "refusal": "ExampleBusy",
+				"outcome": "not_applied", "attempted": false, "safe_to_retry": true,
+			},
+			wantExit:   output.ExitRateLimited,
+			wantRemedy: "retry",
+		},
+		{
+			name: "timed-out read: a read changes nothing",
+			text: "ExampleDeadline: the read did not answer within its 30s budget. A read changes nothing, so it is safe to retry.",
+			structured: map[string]any{
+				"source": "example_family", "refusal": "ExampleDeadline",
+				"safe_to_retry": true, "budget_seconds": 30,
+			},
+			wantExit:   output.ExitRateLimited,
+			wantRemedy: "retry",
+		},
+		{
+			name: "timed-out write that never reached the operation",
+			text: "ExampleDeadline: the operation's 30s budget ran out before the request reached it, so it did not run. It is safe to retry.",
+			structured: map[string]any{
+				"source": "example_family", "refusal": "ExampleDeadline",
+				"outcome": "not_applied", "attempted": false, "safe_to_retry": true, "budget_seconds": 30,
+			},
+			wantExit:   output.ExitRateLimited,
+			wantRemedy: "retry",
+		},
+		{
+			name: "timed-out write, outcome unknown, idempotent class",
+			text: "ExampleDeadline: the operation was sent and did not answer within its 30s budget. IT MAY HAVE COMPLETED — the outcome is unknown. This act is declared idempotent (retry class A): retrying it with exactly the same arguments converges on the same result and cannot apply it twice. Do not change the arguments to retry. The first call may still be running and may land after this retry; read the record before changing it again.",
+			structured: map[string]any{
+				"source": "example_family", "refusal": "ExampleDeadline",
+				"outcome": "unknown", "attempted": true, "safe_to_retry": true,
+				"retry_safety": "A", "budget_seconds": 30,
+			},
+			wantExit:   output.ExitOutcomeUnknown,
+			wantRemedy: "exactly the same arguments",
+		},
+		{
+			name: "broken connection after send, outcome unknown, fenced class",
+			text: "ExampleOutcomeUnknown: the operation was sent and did not answer. IT MAY HAVE COMPLETED — the outcome is unknown. This act is fenced (retry class B): retrying it with exactly the same arguments cannot apply it twice.",
+			structured: map[string]any{
+				"source": "example_family", "refusal": "ExampleOutcomeUnknown",
+				"outcome": "unknown", "attempted": true, "safe_to_retry": true, "retry_safety": "B",
+			},
+			wantExit:   output.ExitOutcomeUnknown,
+			wantRemedy: "exactly the same arguments",
+		},
+		{
+			name: "write with no retry class, outcome unknown",
+			text: "ExampleOutcomeUnknown: the operation was sent and did not answer. IT MAY HAVE COMPLETED — the outcome is unknown, and failing on this side does not stop the operation on the other. Do not retry it. Read the current state with the matching read tool first, and act on what that says.",
+			structured: map[string]any{
+				"source": "example_family", "refusal": "ExampleOutcomeUnknown",
+				"outcome": "unknown", "attempted": true, "safe_to_retry": false,
+			},
+			wantExit:   output.ExitOutcomeUnknown,
+			wantRemedy: "Do not retry blindly",
+		},
+		{
+			name: "a refusal code the CLI has never seen, outcome unknown",
+			text: "SomeFutureRefusal: the call was accepted and its answer was lost.",
+			structured: map[string]any{
+				"source": "some_future_family", "refusal": "SomeFutureRefusal",
+				"outcome": "unknown", "attempted": true, "safe_to_retry": false,
+			},
+			wantExit:   output.ExitOutcomeUnknown,
+			wantRemedy: "Do not retry blindly",
+		},
+		{
+			name: "attempted with no outcome stated",
+			text: "SomeFutureRefusal: the call was sent; its result is not known.",
+			structured: map[string]any{
+				"source": "some_future_family", "refusal": "SomeFutureRefusal", "attempted": true,
+			},
+			wantExit:   output.ExitOutcomeUnknown,
+			wantRemedy: "Do not retry blindly",
+		},
+		{
+			name: "a refusal code the CLI has never seen, safe to retry",
+			text: "AnotherFutureRefusal: turned away; try again shortly.",
+			structured: map[string]any{
+				"source": "some_future_family", "refusal": "AnotherFutureRefusal", "safe_to_retry": true,
+			},
+			wantExit:   output.ExitRateLimited,
+			wantRemedy: "retry",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := rpcServer(t, refusalResult(tc.text, tc.structured), nil)
+			defer srv.Close()
+			app := newTestAppCtx(t, srv.URL)
+			t.Setenv("GIVMO_API_KEY", "tok")
+
+			_, err := app.callTool(context.Background(), "example_tool", map[string]any{}, true, "example.scope")
+			if err == nil {
+				t.Fatal("expected the refusal to surface as an error")
+			}
+			oe := output.AsError(err)
+			if oe.Code != tc.wantExit {
+				t.Errorf("exit %d (%s), want %d (%s)", oe.Code, output.CodeName(oe.Code), tc.wantExit, output.CodeName(tc.wantExit))
+			}
+			if !strings.Contains(oe.Message, tc.text) {
+				t.Errorf("message must carry the server's text verbatim; got %q", oe.Message)
+			}
+			if !strings.Contains(oe.Remediation, tc.wantRemedy) {
+				t.Errorf("remediation %q does not say %q", oe.Remediation, tc.wantRemedy)
+			}
+			for _, wrong := range []string{"Adjust the request", "login", "unreachable"} {
+				if strings.Contains(oe.Remediation, wrong) {
+					t.Errorf("remediation must not say %q; got %q", wrong, oe.Remediation)
+				}
+			}
+		})
+	}
+}
+
+// TestCallTool_RefusalWithoutDispositionKeepsCodeMapping pins the boundary: a
+// refusal whose structuredContent states neither an outcome nor a retry verdict
+// keeps the code-based mapping it had before the structured fields were read.
+func TestCallTool_RefusalWithoutDispositionKeepsCodeMapping(t *testing.T) {
+	cases := []struct {
+		name       string
+		text       string
+		structured map[string]any
+		wantExit   int
+	}{
+		{
+			// The money tool's refusal: its structured code is the one it prefixes.
+			name: "donation refusal",
+			text: "charity_inactive: The target charity is not available for donations.",
+			structured: map[string]any{
+				"source": "givmo_donation_intent", "refusal": "charity_inactive", "param": "charity_id",
+			},
+			wantExit: output.ExitValidation,
+		},
+		{
+			name:       "a domain refusal the CLI has no code for",
+			text:       "ExampleDomainRefusal: that record is not in a state that allows this change.",
+			structured: map[string]any{"source": "example_family", "refusal": "ExampleDomainRefusal"},
+			wantExit:   output.ExitValidation,
+		},
+		{
+			name:       "a safe_to_retry of the wrong type claims nothing",
+			text:       "ExampleDomainRefusal: refused.",
+			structured: map[string]any{"source": "example_family", "refusal": "ExampleDomainRefusal", "safe_to_retry": "yes"},
+			wantExit:   output.ExitValidation,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := rpcServer(t, refusalResult(tc.text, tc.structured), nil)
+			defer srv.Close()
+			app := newTestAppCtx(t, srv.URL)
+			t.Setenv("GIVMO_API_KEY", "tok")
+
+			_, err := app.callTool(context.Background(), "example_tool", map[string]any{}, true, "example.scope")
+			if err == nil {
+				t.Fatal("expected the refusal to surface as an error")
+			}
+			if got := output.AsError(err).Code; got != tc.wantExit {
+				t.Errorf("exit %d, want %d", got, tc.wantExit)
+			}
+		})
+	}
+}
+
+// TestCallTool_StructuredRefusalCodeOutranksText pins that the structured refusal
+// code is read before the text: the money tool's own refusals carry their code only
+// in structuredContent, and text without a code prefix must not fall to the wording
+// heuristic (here "not found", which alone would read as an auth failure).
+func TestCallTool_StructuredRefusalCodeOutranksText(t *testing.T) {
+	result := refusalResult(
+		"the requested charity was not found among those open for donations.",
+		map[string]any{"source": "givmo_donation_intent", "refusal": "charity_inactive", "param": "charity_id"},
+	)
+	srv := rpcServer(t, result, nil)
+	defer srv.Close()
+	app := newTestAppCtx(t, srv.URL)
+	t.Setenv("GIVMO_API_KEY", "tok")
+
+	_, err := app.callTool(context.Background(), "create_donation_intent", map[string]any{}, true, "givmo.donation_intents.create")
+	if err == nil {
+		t.Fatal("expected a refused-write tool error")
+	}
+	if got := output.AsError(err).Code; got != output.ExitValidation {
+		t.Errorf("structured charity_inactive -> exit %d, want ExitValidation (%d)", got, output.ExitValidation)
+	}
+}
