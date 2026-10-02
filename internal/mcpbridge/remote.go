@@ -78,6 +78,9 @@ func (r *HTTPRemote) Forward(ctx context.Context, method string, params json.Raw
 	if err != nil {
 		return nil, &rpcError{Code: codeInternalError, Message: "marshal remote request: " + err.Error()}
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	timeout := r.AuxTimeout
 	toolCall := method == "tools/call"
 	if toolCall {
