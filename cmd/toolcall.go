@@ -152,9 +152,10 @@ func mcpTextContent(tr mcpToolResult) string {
 }
 
 // donationRejectionCodes are the stable Connect error codes the create_donation_intent
-// money tool prefixes onto its refusal text as "<code>: <human message>" — the backend
-// renders f"{exc.code}: {exc.message}" (donation_intent_tools.py) for every
-// DonationIntentRejection (connect/donation_intent_service.py). Each is a request/domain refusal
+// money tool refuses with: it prefixes them onto its refusal text as "<code>: <human
+// message>" — the backend renders f"{exc.code}: {exc.message}" (donation_intent_tools.py)
+// for every DonationIntentRejection (connect/donation_intent_service.py) — and sends them
+// as structuredContent's refusal. Each is a request/domain refusal
 // the caller self-repairs by CHANGING INPUTS (a different charity, a valid amount) —
 // never by re-authenticating. Classification MUST key on this stable code, not the human
 // wording: charity_inactive's message ("...not available for donations.") would otherwise
@@ -171,6 +172,8 @@ var donationRejectionCodes = map[string]bool{
 	"link_token_not_supported":        true,
 	"reserved_metadata_key":           true,
 	"invalid_request":                 true,
+	"return_url_not_givmo":            true, // return_url must be an https page on a Givmo host
+	"invalid_metadata":                true,
 }
 
 // leadingToken returns the maximal leading run of snake_case token characters
@@ -284,6 +287,11 @@ func toolErrorFromText(text, name, refusal string) *output.Error {
 		switch {
 		case code == "tool_not_found":
 			return authError()
+		case code == "donor_unavailable":
+			// The credential's account is gone: no change to the request fixes it.
+			return output.New(output.ExitAuth,
+				"the MCP tool '"+name+"' found no signed-in donor: "+text,
+				"The Givmo account behind this credential may no longer exist. Run `givmo login` with an active account, then retry.")
 		case code == "invalid_arguments" || donationRejectionCodes[code]:
 			return validationError()
 		}

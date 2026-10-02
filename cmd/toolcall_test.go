@@ -205,6 +205,8 @@ func TestCallTool_MoneyRejectionKeysOnCodeNotText(t *testing.T) {
 		{"amount_below_charity_minimum", "amount_below_charity_minimum: amount_cents must be at least 500 for this charity."},
 		{"amount_above_charity_maximum", "amount_above_charity_maximum: amount_cents must be at most 1000000 for this charity."},
 		{"invalid_request", "invalid_request: cause_etf_id is not a valid id."},
+		{"return_url_not_givmo", "return_url_not_givmo: return_url must be a Givmo page: an https address on a Givmo host. Omit return_url to send the donor back to the Givmo pay page; after checkout a donor is only ever sent to a Givmo page."},
+		{"invalid_metadata", "invalid_metadata: metadata may hold at most 20 keys; you sent 21."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -672,5 +674,31 @@ func TestCallTool_RateLimitedExitsFiveWithRetryAfter(t *testing.T) {
 	}
 	if !strings.Contains(oe.Remediation, "Wait 55 seconds") {
 		t.Errorf("remediation must say how long to wait: %q", oe.Remediation)
+	}
+}
+
+// TestCallTool_DonorUnavailableIsAnAuthFailure: the money tool's own refusal for a
+// credential whose account is gone carries its code only in structuredContent
+// (the text has no code prefix). No change to the request fixes it.
+func TestCallTool_DonorUnavailableIsAnAuthFailure(t *testing.T) {
+	result := refusalResult(
+		"no signed-in donor is available for this donation; the account may no longer exist.",
+		map[string]any{"source": "givmo_donation_intent", "refusal": "donor_unavailable"},
+	)
+	srv := rpcServer(t, result, nil)
+	defer srv.Close()
+	app := newTestAppCtx(t, srv.URL)
+	t.Setenv("GIVMO_API_KEY", "tok")
+
+	_, err := app.callTool(context.Background(), "create_donation_intent", map[string]any{}, true, "givmo.donation_intents.create")
+	if err == nil {
+		t.Fatal("expected a refused-write tool error")
+	}
+	oe := output.AsError(err)
+	if oe.Code != output.ExitAuth {
+		t.Errorf("donor_unavailable -> exit %d, want ExitAuth (%d)", oe.Code, output.ExitAuth)
+	}
+	if strings.Contains(oe.Remediation, "Adjust the request") {
+		t.Errorf("no change to the request fixes a missing account: %q", oe.Remediation)
 	}
 }

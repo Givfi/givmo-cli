@@ -183,7 +183,7 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&diCauseETF, "cause-etf", "", "opaque cause-ETF id (cetf_…) to donate to")
 	cmd.Flags().IntVar(&diAmount, "amount", 0, "donation amount in cents (required; minimum 500 = $5.00)")
 	cmd.Flags().StringVar(&diIdemKey, "idempotency-key", "", "idempotency key (auto-generated if omitted; reuse on retry to avoid a double charge)")
-	cmd.Flags().StringVar(&diReturnURL, "return-url", "", "optional https URL to return to after checkout")
+	cmd.Flags().StringVar(&diReturnURL, "return-url", "", "optional Givmo page (an https address on a Givmo host) to return the donor to after checkout; any other address is refused")
 	cmd.Flags().BoolVar(&diOpen, "open", false, "open the hosted-checkout URL in a browser")
 	return cmd
 }
