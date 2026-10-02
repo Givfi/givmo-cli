@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -125,6 +126,9 @@ func (r *HTTPRemote) Forward(ctx context.Context, method string, params json.Raw
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, &rpcError{Code: codeInvalidRequest, Message: fmt.Sprintf("remote MCP rejected auth (HTTP %d); run `givmo login`", resp.StatusCode)}
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, rateLimited(resp.Header, body)
+	}
 	if readErr != nil {
 		if toolCall {
 			return nil, toolCallUnanswered("its answer was cut off: " + lostAnswerCause(readErr, start))
@@ -150,18 +154,92 @@ func (r *HTTPRemote) Forward(ctx context.Context, method string, params json.Raw
 
 	var rpc struct {
 		Result json.RawMessage `json:"result"`
-		Error  *rpcError       `json:"error"`
+		Error  json.RawMessage `json:"error"`
+	}
+	nonRPC := func() *rpcError {
+		if u := unanswered(); u != nil {
+			return u
+		}
+		return &rpcError{Code: codeInternalError, Message: "remote returned non-JSON-RPC body"}
 	}
 	if err := json.Unmarshal(payload, &rpc); err != nil {
-		if u := unanswered(); u != nil {
-			return nil, u
-		}
-		return nil, &rpcError{Code: codeInternalError, Message: "remote returned non-JSON-RPC body"}
+		return nil, nonRPC()
 	}
-	if rpc.Error != nil {
-		return nil, rpc.Error
+	if len(rpc.Error) > 0 && string(rpc.Error) != "null" {
+		var jsonRPC rpcError
+		if json.Unmarshal(rpc.Error, &jsonRPC) == nil {
+			return nil, &jsonRPC
+		}
+		// Not a JSON-RPC error object: the transport's compact envelope, whose code
+		// is a string. It answers a request refused before it was read.
+		if c, ok := compactError(payload); ok {
+			if u := unanswered(); u != nil {
+				return nil, u
+			}
+			return nil, &rpcError{Code: codeInternalError,
+				Message: fmt.Sprintf("remote MCP refused the request (HTTP %d, %s): %s", resp.StatusCode, c.Code, c.Message)}
+		}
+		return nil, nonRPC()
 	}
 	return rpc.Result, nil
+}
+
+// compactErrorBody is the transport's compact error envelope, which the remote
+// answers a request it refuses before reading it with (an HTTP 429, for one):
+// {"error": {"code": "rate_limited", "message": "…"}}. Unlike a JSON-RPC
+// error, its code is a string.
+type compactErrorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// compactError decodes body as the compact error envelope; ok reports whether
+// it is one.
+func compactError(body []byte) (compactErrorBody, bool) {
+	var env struct {
+		Error compactErrorBody `json:"error"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(body), &env) != nil || (env.Error.Code == "" && env.Error.Message == "") {
+		return compactErrorBody{}, false
+	}
+	return env.Error, true
+}
+
+// rateLimited is the error for an HTTP 429 from the remote MCP. The remote
+// refuses before it reads the request, so nothing ran. The message carries the
+// server's own words and its Retry-After; the data carries Retry-After and the
+// RateLimit-* fields as sent.
+func rateLimited(h http.Header, body []byte) *rpcError {
+	msg := "remote MCP rate-limited the request (HTTP 429)"
+	if c, ok := compactError(body); ok && c.Message != "" {
+		msg += ": " + c.Message
+	}
+	retryAfter := strings.TrimSpace(h.Get("Retry-After"))
+	data := map[string]any{"http_status": http.StatusTooManyRequests}
+	if retryAfter != "" {
+		msg += " (Retry-After: " + RetryAfterText(retryAfter) + ")"
+		data["retry_after"] = retryAfter
+	}
+	for _, f := range []string{"RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset"} {
+		if v := strings.TrimSpace(h.Get(f)); v != "" {
+			data[strings.ToLower(strings.ReplaceAll(f, "-", "_"))] = v
+		}
+	}
+	return &rpcError{Code: codeInternalError, Kind: KindRateLimited, Message: msg, Data: data, RetryAfter: retryAfter}
+}
+
+// RetryAfterText renders a Retry-After value for a person: whole seconds as
+// "N seconds", an HTTP date as it was sent.
+func RetryAfterText(v string) string {
+	n, err := strconv.Atoi(v)
+	switch {
+	case err != nil || n < 0:
+		return v
+	case n == 1:
+		return "1 second"
+	default:
+		return strconv.Itoa(n) + " seconds"
+	}
 }
 
 // toolCallUnanswered is the error for a tools/call that was sent but never

@@ -79,6 +79,12 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 		case mcpbridge.KindUnreachable:
 			return nil, output.New(output.ExitNetwork, msg,
 				"Check connectivity and the active profile's api_base (`givmo config view`); the MCP endpoint may not be enabled in this environment. Nothing was sent, so a retry is safe.")
+		case mcpbridge.KindRateLimited:
+			remediation := "Nothing ran. Back off, then retry."
+			if rerr.RetryAfter != "" {
+				remediation = "Nothing ran. Wait " + mcpbridge.RetryAfterText(rerr.RetryAfter) + " (the server's Retry-After), then retry."
+			}
+			return nil, output.New(output.ExitRateLimited, msg, remediation)
 		}
 		// The bridge maps 401/403 to a message mentioning login; other transport
 		// failures are internal/invalid-request codes.

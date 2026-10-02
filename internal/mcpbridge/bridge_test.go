@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -232,5 +234,36 @@ func TestServe_ToolsCallForwardsRefusalVerbatim(t *testing.T) {
 	haveJSON, _ := json.Marshal(have)
 	if !bytes.Equal(wantJSON, haveJSON) {
 		t.Errorf("refusal not forwarded verbatim:\n got %s\nwant %s", haveJSON, wantJSON)
+	}
+}
+
+// TestServe_RateLimitReachesTheIDE runs the stdio bridge over a real HTTPRemote
+// against a remote answering 429: the agent IDE gets a JSON-RPC error carrying
+// the server's message and its Retry-After, not a decode failure.
+func TestServe_RateLimitReachesTheIDE(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "55")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"code":"rate_limited","message":"Rate limit exceeded. Retry after the Retry-After period."}}`))
+	}))
+	defer srv.Close()
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":4,"method":"tools/list"}` + "\n")
+	var out bytes.Buffer
+	s := NewServer(Config{In: in, Out: &out, Remote: NewHTTPRemote(srv.URL, "", srv.Client())})
+	if err := s.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resps := decodeResponses(t, out.Bytes())
+	if len(resps) != 1 || resps[0].Error == nil {
+		t.Fatalf("expected a JSON-RPC error, got %+v", resps)
+	}
+	e := resps[0].Error
+	if !strings.Contains(e.Message, "Retry-After: 55 seconds") || !strings.Contains(e.Message, "Rate limit exceeded") {
+		t.Errorf("the IDE must see the server's message and Retry-After: %q", e.Message)
+	}
+	data, _ := e.Data.(map[string]any)
+	if data["retry_after"] != "55" {
+		t.Errorf("error data must carry retry_after: %+v", e.Data)
 	}
 }

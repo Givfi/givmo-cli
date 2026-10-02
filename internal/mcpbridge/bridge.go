@@ -53,6 +53,8 @@ type rpcError struct {
 	// Kind classifies a failure the remote detected itself, for callers that
 	// branch on it (the CLI's own commands). It never reaches the wire.
 	Kind ErrorKind `json:"-"`
+	// RetryAfter is a rate-limited answer's Retry-After header, verbatim.
+	RetryAfter string `json:"-"`
 }
 
 // ErrorKind classifies a failure of a request to the remote MCP.
@@ -69,6 +71,9 @@ const (
 	// stopped waiting, the connection broke, or the remote failed without a
 	// JSON-RPC answer), so the call may have run.
 	KindOutcomeUnknown
+	// KindRateLimited: the remote answered HTTP 429 before reading the request,
+	// so nothing ran; RetryAfter says when to try again.
+	KindRateLimited
 )
 
 // RemoteInvoker forwards a raw JSON-RPC message to the remote Givmo MCP and

@@ -244,3 +244,87 @@ func TestHTTPRemote_NothingSentIsUnreachable(t *testing.T) {
 		t.Errorf("message = %q", rerr.Message)
 	}
 }
+
+// rateLimitedServer answers every request the way the remote MCP answers a
+// tripped rate limit: HTTP 429, the transport's compact envelope (whose code is
+// a string, not a JSON-RPC integer), Retry-After in whole seconds and the
+// RateLimit-* fields.
+func rateLimitedServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "55")
+		w.Header().Set("RateLimit-Limit", "60")
+		w.Header().Set("RateLimit-Remaining", "0")
+		w.Header().Set("RateLimit-Reset", "55")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"code":"rate_limited","message":"Rate limit exceeded. Retry after the Retry-After period."}}`))
+	}))
+}
+
+func TestHTTPRemote_RateLimitedDecodesTheCompactBody(t *testing.T) {
+	srv := rateLimitedServer(t)
+	defer srv.Close()
+	rem := NewHTTPRemote(srv.URL, "", srv.Client())
+
+	for _, method := range []string{"tools/call", "tools/list"} {
+		t.Run(method, func(t *testing.T) {
+			_, rerr := rem.Forward(context.Background(), method, nil)
+			if rerr == nil {
+				t.Fatal("expected the 429 to surface as an error")
+			}
+			if rerr.Kind != KindRateLimited {
+				t.Errorf("kind = %v, want KindRateLimited", rerr.Kind)
+			}
+			if strings.Contains(rerr.Message, "non-JSON-RPC") {
+				t.Errorf("the 429 body must decode: %q", rerr.Message)
+			}
+			for _, want := range []string{"HTTP 429", "Rate limit exceeded", "Retry-After: 55 seconds"} {
+				if !strings.Contains(rerr.Message, want) {
+					t.Errorf("message %q does not carry %q", rerr.Message, want)
+				}
+			}
+			if rerr.RetryAfter != "55" {
+				t.Errorf("RetryAfter = %q, want 55", rerr.RetryAfter)
+			}
+			data, _ := rerr.Data.(map[string]any)
+			if data["retry_after"] != "55" || data["ratelimit_limit"] != "60" || data["ratelimit_remaining"] != "0" || data["ratelimit_reset"] != "55" {
+				t.Errorf("data must carry Retry-After and the RateLimit-* fields: %+v", rerr.Data)
+			}
+		})
+	}
+}
+
+func TestHTTPRemote_CompactErrorOnAnotherStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"code":"example_refusal","message":"Refused before it was read."}}`))
+	}))
+	defer srv.Close()
+	rem := NewHTTPRemote(srv.URL, "", srv.Client())
+
+	_, rerr := rem.Forward(context.Background(), "tools/list", nil)
+	if rerr == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"HTTP 400", "example_refusal", "Refused before it was read."} {
+		if !strings.Contains(rerr.Message, want) {
+			t.Errorf("message %q does not carry %q", rerr.Message, want)
+		}
+	}
+}
+
+func TestRetryAfterText(t *testing.T) {
+	for in, want := range map[string]string{
+		"55":                            "55 seconds",
+		"1":                             "1 second",
+		"0":                             "0 seconds",
+		"Fri, 02 Oct 2026 15:00:00 GMT": "Fri, 02 Oct 2026 15:00:00 GMT",
+	} {
+		if got := RetryAfterText(in); got != want {
+			t.Errorf("RetryAfterText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

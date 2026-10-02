@@ -643,3 +643,34 @@ func TestDonationIntentsCreate_UnknownOutcomeNamesTheIdempotencyKey(t *testing.T
 		})
 	}
 }
+
+// TestCallTool_RateLimitedExitsFiveWithRetryAfter: a 429 from the remote MCP exits
+// 5 with the server's Retry-After in the message and the wait in the remediation.
+func TestCallTool_RateLimitedExitsFiveWithRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "55")
+		w.Header().Set("RateLimit-Limit", "60")
+		w.Header().Set("RateLimit-Remaining", "0")
+		w.Header().Set("RateLimit-Reset", "55")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"code":"rate_limited","message":"Rate limit exceeded. Retry after the Retry-After period."}}`))
+	}))
+	defer srv.Close()
+	app := newTestAppCtx(t, srv.URL)
+
+	_, err := app.callTool(context.Background(), "search_charities", map[string]any{"query": "water"}, false, "")
+	if err == nil {
+		t.Fatal("expected the 429 to surface as an error")
+	}
+	oe := output.AsError(err)
+	if oe.Code != output.ExitRateLimited {
+		t.Errorf("429 -> exit %d, want ExitRateLimited (%d)", oe.Code, output.ExitRateLimited)
+	}
+	if !strings.Contains(oe.Message, "Retry-After: 55 seconds") {
+		t.Errorf("message must carry the server's Retry-After: %q", oe.Message)
+	}
+	if !strings.Contains(oe.Remediation, "Wait 55 seconds") {
+		t.Errorf("remediation must say how long to wait: %q", oe.Remediation)
+	}
+}
