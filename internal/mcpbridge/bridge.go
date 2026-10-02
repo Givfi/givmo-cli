@@ -50,7 +50,31 @@ type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
+	// Kind classifies a failure the remote detected itself, for callers that
+	// branch on it (the CLI's own commands). It never reaches the wire.
+	Kind ErrorKind `json:"-"`
+	// RetryAfter is a rate-limited answer's Retry-After header, verbatim.
+	RetryAfter string `json:"-"`
 }
+
+// ErrorKind classifies a failure of a request to the remote MCP.
+type ErrorKind int
+
+const (
+	// KindRemote is the remote's own JSON-RPC error, or a failure not classified
+	// below.
+	KindRemote ErrorKind = iota
+	// KindUnreachable: the request never reached the remote (DNS, connect, TLS,
+	// or a timeout before it was sent), so nothing ran.
+	KindUnreachable
+	// KindOutcomeUnknown: a tools/call was sent but no answer arrived (the CLI
+	// stopped waiting, the connection broke, or the remote failed without a
+	// JSON-RPC answer), so the call may have run.
+	KindOutcomeUnknown
+	// KindRateLimited: the remote answered HTTP 429 before reading the request,
+	// so nothing ran; RetryAfter says when to try again.
+	KindRateLimited
+)
 
 // RemoteInvoker forwards a raw JSON-RPC message to the remote Givmo MCP and
 // returns the remote's raw JSON-RPC response body. It is an interface so tests
@@ -181,36 +205,34 @@ func (s *Server) handleInitialize(_ json.RawMessage) InitializeResult {
 	}
 }
 
-// tool is a single tools/list entry.
-type tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
-}
-
 func (s *Server) handleToolsList(ctx context.Context) (any, *rpcError) {
 	raw, rerr := s.remote.Forward(ctx, "tools/list", nil)
 	if rerr != nil {
 		return nil, rerr
 	}
-	// The remote returns a JSON-RPC result object { "tools": [...] }. Apply the
-	// optional allowlist filter.
+	// The remote returns a JSON-RPC result object { "tools": [...] }. Each tool is
+	// forwarded whole: its title, annotations, outputSchema and securitySchemes
+	// (which tells a client a tool needs sign-in) included, and any field the
+	// remote adds later. Only the name is read, for the optional allowlist filter.
 	var res struct {
-		Tools []tool `json:"tools"`
+		Tools []json.RawMessage `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, &rpcError{Code: codeInternalError, Message: "remote tools/list decode failed: " + err.Error()}
 	}
-	if s.toolFilt != nil {
-		filtered := res.Tools[:0]
-		for _, t := range res.Tools {
-			if s.toolFilt[t.Name] {
-				filtered = append(filtered, t)
+	tools := make([]json.RawMessage, 0, len(res.Tools))
+	for _, t := range res.Tools {
+		if s.toolFilt != nil {
+			var named struct {
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(t, &named) != nil || !s.toolFilt[named.Name] {
+				continue
 			}
 		}
-		res.Tools = filtered
+		tools = append(tools, t)
 	}
-	return map[string]any{"tools": res.Tools}, nil
+	return map[string]any{"tools": tools}, nil
 }
 
 func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (any, *rpcError) {

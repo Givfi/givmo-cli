@@ -12,14 +12,15 @@ import (
 func TestExitCodes_AreStable(t *testing.T) {
 	// Pin the documented contract so a reorder can't silently change codes.
 	pairs := map[int]int{
-		ExitOK:          0,
-		ExitGeneric:     1,
-		ExitUsage:       2,
-		ExitAuth:        3,
-		ExitNotFound:    4,
-		ExitRateLimited: 5,
-		ExitNetwork:     6,
-		ExitValidation:  7,
+		ExitOK:             0,
+		ExitGeneric:        1,
+		ExitUsage:          2,
+		ExitAuth:           3,
+		ExitNotFound:       4,
+		ExitRateLimited:    5,
+		ExitNetwork:        6,
+		ExitValidation:     7,
+		ExitOutcomeUnknown: 8,
 	}
 	for got, want := range pairs {
 		if got != want {
@@ -125,6 +126,9 @@ func TestPrinter_HumanUsedWhenNotJSON(t *testing.T) {
 func TestCodeName(t *testing.T) {
 	if CodeName(ExitAuth) != "auth-required" {
 		t.Errorf("code name for auth = %q", CodeName(ExitAuth))
+	}
+	if CodeName(ExitOutcomeUnknown) != "outcome-unknown" {
+		t.Errorf("code name for outcome unknown = %q", CodeName(ExitOutcomeUnknown))
 	}
 	if CodeName(999) != "unknown" {
 		t.Errorf("unknown code name = %q", CodeName(999))

@@ -200,3 +200,42 @@ func TestKnownSandboxEvents(t *testing.T) {
 		t.Error("donation.succeeded should be a known event")
 	}
 }
+
+// TestBuildCreateIntentArgs_ConformToTheToolSchema pins the arguments against the
+// create_donation_intent input schema: a closed object (additionalProperties false)
+// whose properties are amount_cents, charity_id, cause_etf_id, idempotency_key,
+// return_url and metadata, with amount_cents and idempotency_key required. A key
+// outside it would be refused as invalid_arguments.
+func TestBuildCreateIntentArgs_ConformToTheToolSchema(t *testing.T) {
+	properties := map[string]bool{
+		"amount_cents": true, "charity_id": true, "cause_etf_id": true,
+		"idempotency_key": true, "return_url": true, "metadata": true,
+	}
+	for _, args := range []map[string]any{
+		mustArgs(t, "ch_1", "", 2500, "k-1", ""),
+		mustArgs(t, "", "cetf_1", 500, "k-2", "https://pay.givmo.io/thanks"),
+	} {
+		for key := range args {
+			if !properties[key] {
+				t.Errorf("argument %q is not in the tool's input schema", key)
+			}
+		}
+		for _, required := range []string{"amount_cents", "idempotency_key"} {
+			if _, ok := args[required]; !ok {
+				t.Errorf("required argument %q missing: %+v", required, args)
+			}
+		}
+		if _, ok := args["amount_cents"].(int); !ok {
+			t.Errorf("amount_cents must be an integer: %T", args["amount_cents"])
+		}
+	}
+}
+
+func mustArgs(t *testing.T, charity, etf string, amount int, key, returnURL string) map[string]any {
+	t.Helper()
+	args, err := buildCreateIntentArgs(charity, etf, amount, key, returnURL)
+	if err != nil {
+		t.Fatalf("buildCreateIntentArgs: %v", err)
+	}
+	return args
+}

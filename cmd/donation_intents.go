@@ -136,12 +136,12 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 			}
 			app.prodBanner("creating a donation intent")
 
-			ctx, cancel := baseContext()
+			ctx, cancel := toolContext()
 			defer cancel()
 
 			payload, err := app.callTool(ctx, "create_donation_intent", toolArgs, true, "givmo.donation_intents.create")
 			if err != nil {
-				return err
+				return withIdempotencyRetry(err, idemKey)
 			}
 			var di donationIntent
 			if uerr := decodeToolPayload(payload, &di); uerr != nil {
@@ -183,9 +183,25 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&diCauseETF, "cause-etf", "", "opaque cause-ETF id (cetf_…) to donate to")
 	cmd.Flags().IntVar(&diAmount, "amount", 0, "donation amount in cents (required; minimum 500 = $5.00)")
 	cmd.Flags().StringVar(&diIdemKey, "idempotency-key", "", "idempotency key (auto-generated if omitted; reuse on retry to avoid a double charge)")
-	cmd.Flags().StringVar(&diReturnURL, "return-url", "", "optional https URL to return to after checkout")
+	cmd.Flags().StringVar(&diReturnURL, "return-url", "", "optional Givmo page (an https address on a Givmo host) to return the donor to after checkout; any other address is refused")
 	cmd.Flags().BoolVar(&diOpen, "open", false, "open the hosted-checkout URL in a browser")
 	return cmd
+}
+
+// withIdempotencyRetry names the idempotency key when a create's outcome is
+// unknown. No consumer tool reads donation intents back, so "read before
+// retrying" cannot be followed here; the safe next step is a retry with the SAME
+// key, which returns the same donation intent instead of creating a second one.
+// Every other error passes through unchanged.
+func withIdempotencyRetry(err error, idemKey string) error {
+	oe := output.AsError(err)
+	if oe.Code != output.ExitOutcomeUnknown {
+		return err
+	}
+	named := *oe
+	named.Remediation = "Re-run the same command with --idempotency-key " + idemKey +
+		": a retry with the same key returns the same donation intent instead of creating a second one."
+	return &named
 }
 
 // donationIntentKeyValues renders the non-secret fields of a created intent.

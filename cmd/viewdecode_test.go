@@ -203,13 +203,14 @@ func TestDecode_ReceiptSummary(t *testing.T) {
 	const payload = `{
 		"source": "givmo_account",
 		"tax_year": 2025,
-		"tax_year_basis": "America/New_York charge date",
+		"tax_year_basis": "donor-local charge date (America/New_York when unavailable)",
 		"recipient": {"name": "Givmo Charitable Fund", "ein": "99-2418877"},
-		"deductible_total": "150.00",
+		"deductible_total": "180.00",
 		"currency": "USD",
 		"deductible_contributions": {
 			"direct_donations": {"count": 3, "total": "100.00"},
-			"wallet_deposits": {"count": 2, "total": "50.00"}
+			"wallet_deposits": {"count": 2, "total": "50.00"},
+			"group_contributions": {"count": 4, "total": "30.00"}
 		},
 		"grant_recommendations": {"count": 1, "total": "25.00"},
 		"is_official_receipt": true,
@@ -230,7 +231,7 @@ func TestDecode_ReceiptSummary(t *testing.T) {
 	if r.Recipient.EIN != "99-2418877" {
 		t.Errorf("recipient.ein = %q", r.Recipient.EIN)
 	}
-	if r.DeductibleTotal != "150.00" {
+	if r.DeductibleTotal != "180.00" {
 		t.Errorf("deductible_total = %q", r.DeductibleTotal)
 	}
 	if r.Currency != "USD" {
@@ -241,6 +242,9 @@ func TestDecode_ReceiptSummary(t *testing.T) {
 	}
 	if r.DeductibleContributions.WalletDeposits.Count != 2 || r.DeductibleContributions.WalletDeposits.Total != "50.00" {
 		t.Errorf("wallet_deposits decoded wrong: %+v", r.DeductibleContributions.WalletDeposits)
+	}
+	if g := r.DeductibleContributions.GroupContributions; g == nil || g.Count != 4 || g.Total != "30.00" {
+		t.Errorf("group_contributions decoded wrong: %+v", g)
 	}
 	if r.GrantRecommendations.Count != 1 || r.GrantRecommendations.Total != "25.00" {
 		t.Errorf("grant_recommendations decoded wrong: %+v", r.GrantRecommendations)

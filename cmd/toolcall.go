@@ -23,8 +23,8 @@ func (a *appCtx) mcpEndpoint() string {
 }
 
 // mcpToolResult is the subset of an MCP CallToolResult the CLI reads: the
-// structured payload (a dict on success), the text content (always present; the
-// only payload when isError), and the error flag.
+// structured payload (a dict on success, a refusal's machine-readable fields on
+// an error), the text content (always present), and the error flag.
 type mcpToolResult struct {
 	Content []struct {
 		Type string `json:"type"`
@@ -61,12 +61,31 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 		authHeader = cred.AuthorizationHeader()
 	}
 	remote := mcpbridge.NewHTTPRemote(a.mcpEndpoint(), authHeader, a.httpClient())
+	if a.toolCallTimeout > 0 {
+		remote.CallTimeout = a.toolCallTimeout
+	}
 	params, err := json.Marshal(map[string]any{"name": name, "arguments": args})
 	if err != nil {
 		return nil, output.New(output.ExitGeneric, "could not encode the MCP tool call: "+err.Error(), "")
 	}
 	raw, rerr := remote.Forward(ctx, "tools/call", json.RawMessage(params))
 	if rerr != nil {
+		msg := "remote MCP call failed: " + strings.TrimSpace(rerr.Message)
+		switch rerr.Kind {
+		case mcpbridge.KindOutcomeUnknown:
+			// Sent, never answered: the call may have run. Never "unreachable".
+			return nil, output.New(output.ExitOutcomeUnknown, msg,
+				"Read the current state before retrying (for example with the matching get or list command); a read-only command is safe to re-run.")
+		case mcpbridge.KindUnreachable:
+			return nil, output.New(output.ExitNetwork, msg,
+				"Check connectivity and the active profile's api_base (`givmo config view`); the MCP endpoint may not be enabled in this environment. Nothing was sent, so a retry is safe.")
+		case mcpbridge.KindRateLimited:
+			remediation := "Nothing ran. Back off, then retry."
+			if rerr.RetryAfter != "" {
+				remediation = "Nothing ran. Wait " + mcpbridge.RetryAfterText(rerr.RetryAfter) + " (the server's Retry-After), then retry."
+			}
+			return nil, output.New(output.ExitRateLimited, msg, remediation)
+		}
 		// The bridge maps 401/403 to a message mentioning login; other transport
 		// failures are internal/invalid-request codes.
 		lower := strings.ToLower(rerr.Message)
@@ -80,7 +99,7 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 			code = output.ExitValidation
 			remediation = "Fix the request per the message and retry."
 		}
-		return nil, output.New(code, "remote MCP call failed: "+strings.TrimSpace(rerr.Message), remediation)
+		return nil, output.New(code, msg, remediation)
 	}
 	var tr mcpToolResult
 	if uerr := json.Unmarshal(raw, &tr); uerr != nil {
@@ -88,10 +107,10 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 			"could not decode the MCP tool result: "+uerr.Error(),
 			"The remote returned an unexpected shape; retry, and report to Givmo support if it persists.")
 	}
-	// isError => a transport/dispatch tool error (tool_not_found, invalid arguments,
-	// or a refused write). Only the text content is populated.
+	// isError => a dispatch error (tool_not_found, invalid arguments) or a refusal.
+	// The text is always populated; a refusal may also carry structuredContent.
 	if tr.IsError {
-		return nil, toolErrorFromText(mcpTextContent(tr), name)
+		return nil, toolErrorFromResult(tr, name)
 	}
 	// Prefer the structured payload; fall back to parsing the text content as JSON.
 	payload := tr.StructuredContent
@@ -133,9 +152,10 @@ func mcpTextContent(tr mcpToolResult) string {
 }
 
 // donationRejectionCodes are the stable Connect error codes the create_donation_intent
-// money tool prefixes onto its refusal text as "<code>: <human message>" — the backend
-// renders f"{exc.code}: {exc.message}" (donation_intent_tools.py) for every
-// DonationIntentRejection (connect/donation_intent_service.py). Each is a request/domain refusal
+// money tool refuses with: it prefixes them onto its refusal text as "<code>: <human
+// message>" — the backend renders f"{exc.code}: {exc.message}" (donation_intent_tools.py)
+// for every DonationIntentRejection (connect/donation_intent_service.py) — and sends them
+// as structuredContent's refusal. Each is a request/domain refusal
 // the caller self-repairs by CHANGING INPUTS (a different charity, a valid amount) —
 // never by re-authenticating. Classification MUST key on this stable code, not the human
 // wording: charity_inactive's message ("...not available for donations.") would otherwise
@@ -152,6 +172,8 @@ var donationRejectionCodes = map[string]bool{
 	"link_token_not_supported":        true,
 	"reserved_metadata_key":           true,
 	"invalid_request":                 true,
+	"return_url_not_givmo":            true, // return_url must be an https page on a Givmo host
+	"invalid_metadata":                true,
 }
 
 // leadingToken returns the maximal leading run of snake_case token characters
@@ -171,14 +193,83 @@ func leadingToken(text string) string {
 	return text[:i]
 }
 
+// toolRefusal is the machine-readable part of a refusal: the fields of an isError
+// result's structuredContent the CLI branches on. The server states there what a
+// caller may do next, so the CLI reads its verdict instead of a list of refusal
+// codes, and a refusal code it has never seen maps the same way. Every field is
+// optional.
+type toolRefusal struct {
+	// Refusal is the refusal's stable code.
+	Refusal string `json:"refusal"`
+	// SafeToRetry is the server's verdict on repeating the call as it was made.
+	SafeToRetry *bool `json:"safe_to_retry"`
+	// Outcome is "not_applied" when the call did not run and "unknown" when it
+	// may have.
+	Outcome string `json:"outcome"`
+	// Attempted says whether the call was sent on to the operation behind the tool.
+	Attempted *bool `json:"attempted"`
+}
+
+// mayHaveRun reports whether the refusal says the call may have run: its outcome
+// is unknown, or it was attempted and is not said to have been left unapplied.
+func (r toolRefusal) mayHaveRun() bool {
+	if r.Outcome == "unknown" {
+		return true
+	}
+	return r.Attempted != nil && *r.Attempted && r.Outcome != "not_applied"
+}
+
+// retrySafe reports whether the server says repeating the call is safe.
+func (r toolRefusal) retrySafe() bool {
+	return r.SafeToRetry != nil && *r.SafeToRetry
+}
+
+// toolErrorFromResult maps an isError tool result to the CLI envelope, by its
+// structured fields first:
+//   - a call that may have run → ExitOutcomeUnknown: read before retrying, and
+//     repeat it only where the server says a same-arguments retry is safe;
+//   - a call the server says is safe to retry (turned away as busy, never sent,
+//     or a read that changed nothing) → ExitRateLimited: back off, then retry;
+//   - anything else keeps the code-based mapping below, keyed on the structured
+//     refusal code when there is one, else on the text's leading code.
+func toolErrorFromResult(tr mcpToolResult, name string) *output.Error {
+	text := strings.TrimSpace(mcpTextContent(tr))
+	if text == "" {
+		text = "the MCP tool '" + name + "' returned an error"
+	}
+	var r toolRefusal
+	if len(tr.StructuredContent) > 0 {
+		// A field of the wrong type stays unset, and an unset field claims nothing.
+		_ = json.Unmarshal(tr.StructuredContent, &r)
+	}
+	switch {
+	case r.mayHaveRun():
+		remediation := "Do not retry blindly: read the current state first (with the matching read or list command), then act on what it says."
+		if r.retrySafe() {
+			remediation = "The server says repeating the call with exactly the same arguments is safe, but the first call may still land: read the current state before changing it again."
+		}
+		return output.New(output.ExitOutcomeUnknown,
+			"the MCP tool '"+name+"' may have run; its outcome is unknown: "+text,
+			remediation)
+	case r.retrySafe():
+		return output.New(output.ExitRateLimited,
+			"the MCP tool '"+name+"' did not complete: "+text,
+			"The server says a retry is safe: wait briefly, then retry.")
+	}
+	return toolErrorFromText(text, name, r.Refusal)
+}
+
 // toolErrorFromText maps an isError tool result (a raised dispatch error or a refused
-// write) to the CLI envelope, keying on the STABLE leading error code the backend
-// renders — never on human message wording. `tool_not_found` is the one genuinely
+// write) to the CLI envelope, keying on the STABLE error code the backend sends — the
+// structured refusal code when the result carries one, else the code it prefixes onto
+// the text — never on human message wording. `tool_not_found` is the one genuinely
 // auth-shaped code (a tool the grant's scope/audience does not include is reported
 // identically to one that does not exist at all), so it → ExitAuth. Every
 // donation-intent rejection and `invalid_arguments` is a request/domain refusal the
-// caller fixes by changing inputs → ExitValidation with the server's message.
-func toolErrorFromText(text, name string) *output.Error {
+// caller fixes by changing inputs → ExitValidation with the server's message. A
+// refusal with no recognized code also exits ExitValidation, but its remediation
+// claims nothing the CLI cannot know.
+func toolErrorFromText(text, name, refusal string) *output.Error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		text = "the MCP tool '" + name + "' returned an error"
@@ -194,11 +285,18 @@ func toolErrorFromText(text, name string) *output.Error {
 			"Adjust the request per the message and retry; this is a request/validation problem, not an authentication failure.")
 	}
 
-	switch code := leadingToken(text); {
-	case code == "tool_not_found":
-		return authError()
-	case code == "invalid_arguments" || donationRejectionCodes[code]:
-		return validationError()
+	for _, code := range []string{refusal, leadingToken(text)} {
+		switch {
+		case code == "tool_not_found":
+			return authError()
+		case code == "donor_unavailable":
+			// The credential's account is gone: no change to the request fixes it.
+			return output.New(output.ExitAuth,
+				"the MCP tool '"+name+"' found no signed-in donor: "+text,
+				"The Givmo account behind this credential may no longer exist. Run `givmo login` with an active account, then retry.")
+		case code == "invalid_arguments" || donationRejectionCodes[code]:
+			return validationError()
+		}
 	}
 
 	// No recognized code prefix: fall back to a conservative heuristic for auth-shaped
@@ -210,7 +308,12 @@ func toolErrorFromText(text, name string) *output.Error {
 	if strings.Contains(lower, "not found") || strings.Contains(lower, "unknown tool") {
 		return authError()
 	}
-	return validationError()
+	// Still no recognized code. The refusal may not be the request's fault, and one
+	// that states no outcome may follow a write that already ran, so the remediation
+	// says only what the CLI knows.
+	return output.New(output.ExitValidation,
+		"the MCP tool '"+name+"' rejected the request: "+text,
+		"Act on the server's message. This CLI does not recognize this refusal, so it cannot say whether changing the request will help or whether a write already ran: read the current state before repeating a write.")
 }
 
 // inbandToolError inspects a successful tool payload for a corrective `error`

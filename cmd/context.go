@@ -21,6 +21,9 @@ type appCtx struct {
 	Config  *config.Config
 	Printer *output.Printer
 	Store   *auth.Store
+	// toolCallTimeout, when non-zero, replaces mcpbridge.ToolCallTimeout for this
+	// context's tool calls (tests use a short one).
+	toolCallTimeout time.Duration
 }
 
 // resolveAppCtx builds the appCtx from global flags + config + env.
@@ -97,4 +100,12 @@ func (a *appCtx) prodBanner(action string) {
 // baseContext returns a cancelable context for network operations.
 func baseContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 60*time.Second)
+}
+
+// toolContext returns the context for a command backed by MCP tool calls. It
+// carries no deadline of its own: each request the MCP remote sends carries its
+// own (mcpbridge.ToolCallTimeout for a tools/call), and a shorter command-wide
+// deadline would cut a call the server is still allowed to be running.
+func toolContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
 }

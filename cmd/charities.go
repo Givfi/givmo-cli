@@ -96,7 +96,7 @@ lists, each with its opaque charity_id (pass it to 'charities get').`,
 			if ein != "" {
 				toolArgs["ein"] = ein
 			}
-			ctx, cancel := baseContext()
+			ctx, cancel := toolContext()
 			defer cancel()
 
 			payload, err := app.callTool(ctx, "search_charities", toolArgs, false, "")
@@ -142,7 +142,7 @@ the profile.`,
 			if err != nil {
 				return err
 			}
-			ctx, cancel := baseContext()
+			ctx, cancel := toolContext()
 			defer cancel()
 
 			charityID, err := app.resolveCharityID(ctx, strings.TrimSpace(args[0]))

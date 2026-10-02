@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -104,7 +106,9 @@ func TestServe_ToolsListBridgesAndFilters(t *testing.T) {
 	}
 	b, _ := json.Marshal(resps[0].Result)
 	var res struct {
-		Tools []tool `json:"tools"`
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
 	}
 	if err := json.Unmarshal(b, &res); err != nil {
 		t.Fatal(err)
@@ -198,5 +202,149 @@ func TestServe_ParseErrorFraming(t *testing.T) {
 	resps := decodeResponses(t, out.Bytes())
 	if len(resps) != 1 || resps[0].Error == nil || resps[0].Error.Code != codeParseError {
 		t.Fatalf("expected parse error, got %+v", resps)
+	}
+}
+
+// TestServe_ToolsCallForwardsRefusalVerbatim pins that a refusal reaches the agent
+// IDE exactly as the server sent it: isError, the text, and every structuredContent
+// field a client branches on (the keys and values are the server's; the codes and
+// text are illustrative).
+func TestServe_ToolsCallForwardsRefusalVerbatim(t *testing.T) {
+	refusal := `{"content":[{"type":"text","text":"ExampleOutcomeUnknown: the operation was sent and did not answer. IT MAY HAVE COMPLETED — the outcome is unknown."}],` +
+		`"structuredContent":{"source":"example_family","refusal":"ExampleOutcomeUnknown","outcome":"unknown","attempted":true,"safe_to_retry":false},` +
+		`"isError":true}`
+	remote := &fakeRemote{callResult: json.RawMessage(refusal)}
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"example_tool","arguments":{}}}` + "\n")
+	var out bytes.Buffer
+	s := NewServer(Config{In: in, Out: &out, Remote: remote})
+	if err := s.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resps := decodeResponses(t, out.Bytes())
+	if len(resps) != 1 || resps[0].Error != nil {
+		t.Fatalf("a refusal is a tool result, not a JSON-RPC error: %+v", resps)
+	}
+	got, _ := json.Marshal(resps[0].Result)
+	var want, have any
+	if err := json.Unmarshal([]byte(refusal), &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(got, &have); err != nil {
+		t.Fatal(err)
+	}
+	wantJSON, _ := json.Marshal(want)
+	haveJSON, _ := json.Marshal(have)
+	if !bytes.Equal(wantJSON, haveJSON) {
+		t.Errorf("refusal not forwarded verbatim:\n got %s\nwant %s", haveJSON, wantJSON)
+	}
+}
+
+// TestServe_RateLimitReachesTheIDE runs the stdio bridge over a real HTTPRemote
+// against a remote answering 429: the agent IDE gets a JSON-RPC error carrying
+// the server's message and its Retry-After, not a decode failure.
+func TestServe_RateLimitReachesTheIDE(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "55")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"code":"rate_limited","message":"Rate limit exceeded. Retry after the Retry-After period."}}`))
+	}))
+	defer srv.Close()
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":4,"method":"tools/list"}` + "\n")
+	var out bytes.Buffer
+	s := NewServer(Config{In: in, Out: &out, Remote: NewHTTPRemote(srv.URL, "", srv.Client())})
+	if err := s.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resps := decodeResponses(t, out.Bytes())
+	if len(resps) != 1 || resps[0].Error == nil {
+		t.Fatalf("expected a JSON-RPC error, got %+v", resps)
+	}
+	e := resps[0].Error
+	if !strings.Contains(e.Message, "Retry-After: 55 seconds") || !strings.Contains(e.Message, "Rate limit exceeded") {
+		t.Errorf("the IDE must see the server's message and Retry-After: %q", e.Message)
+	}
+	data, _ := e.Data.(map[string]any)
+	if data["retry_after"] != "55" {
+		t.Errorf("error data must carry retry_after: %+v", e.Data)
+	}
+}
+
+// donorToolsList is a tools/list result in the shape the remote MCP sends an
+// anonymous caller: a public catalog tool, marked noauth, and a donor's own tool,
+// marked oauth2 with the scope signing in reaches. Field names and values are the
+// server's; descriptions and schemas are shortened. The last tool carries fields
+// a later server may add, which the bridge must forward too.
+const donorToolsList = `{"tools":[
+	{"name":"search_charities","title":"Search charities",
+	 "description":"Search Givmo's charity catalog by name or keyword, and/or by exact EIN (tax id).",
+	 "inputSchema":{"type":"object","properties":{"query":{"type":"string"},"ein":{"type":"string"}},"required":[],"additionalProperties":false},
+	 "outputSchema":{"type":"object","properties":{"source":{"type":"string"},"count":{"type":"integer"}}},
+	 "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},
+	 "securitySchemes":[{"type":"noauth"}]},
+	{"name":"get_receipt","title":"Get my tax receipt summary",
+	 "description":"Get the signed-in Givmo user's tax-receipt view for a tax year.",
+	 "inputSchema":{"type":"object","properties":{"tax_year":{"type":"integer"}},"additionalProperties":false},
+	 "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},
+	 "securitySchemes":[{"type":"oauth2","scopes":["givmo.receipts.read"]}]},
+	{"name":"example_future_tool","title":"Example",
+	 "description":"A tool carrying fields a later server may add.",
+	 "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+	 "icons":[{"src":"https://example.org/icon.png"}],"_meta":{"example":true}}
+]}`
+
+func TestServe_ToolsListForwardsEveryToolField(t *testing.T) {
+	remote := &fakeRemote{toolsListResult: json.RawMessage(donorToolsList)}
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n")
+	var out bytes.Buffer
+	s := NewServer(Config{In: in, Out: &out, Remote: remote})
+	if err := s.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resps := decodeResponses(t, out.Bytes())
+	if len(resps) != 1 || resps[0].Error != nil {
+		t.Fatalf("expected a tools/list result, got %+v", resps)
+	}
+	got, _ := json.Marshal(resps[0].Result)
+	if !jsonEqual(got, []byte(donorToolsList)) {
+		t.Errorf("tools/list not forwarded whole:\n got %s\nwant %s", got, donorToolsList)
+	}
+}
+
+func TestServe_ToolsListFilterKeepsEveryField(t *testing.T) {
+	remote := &fakeRemote{toolsListResult: json.RawMessage(donorToolsList)}
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n")
+	var out bytes.Buffer
+	s := NewServer(Config{In: in, Out: &out, Remote: remote, Tools: []string{"get_receipt"}})
+	if err := s.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resps := decodeResponses(t, out.Bytes())
+	if len(resps) != 1 || resps[0].Error != nil {
+		t.Fatalf("expected a tools/list result, got %+v", resps)
+	}
+	got, _ := json.Marshal(resps[0].Result)
+	var all struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(donorToolsList), &all); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := json.Marshal(map[string]any{"tools": []json.RawMessage{all.Tools[1]}})
+	if !jsonEqual(got, want) {
+		t.Errorf("filtered tools/list must keep the tool whole:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestServe_ToolsListEmptyIsAnArray(t *testing.T) {
+	remote := &fakeRemote{toolsListResult: json.RawMessage(`{"tools":[]}`)}
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n")
+	var out bytes.Buffer
+	s := NewServer(Config{In: in, Out: &out, Remote: remote, Tools: []string{"absent_tool"}})
+	if err := s.Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"tools":[]`) {
+		t.Errorf("an empty list must stay an array: %s", out.String())
 	}
 }

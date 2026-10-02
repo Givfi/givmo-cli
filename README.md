@@ -134,9 +134,18 @@ Scripts and AI agents can branch on these deterministically (defined once in
 | `2` | usage error (bad flags/args) | see `givmo <cmd> --help` |
 | `3` | auth required / failed | run `givmo login` |
 | `4` | not found | check the id via a `search`/`list` |
-| `5` | rate limited | back off, honor `Retry-After` |
+| `5` | rate limited, or refused as safe to retry (nothing changed) | back off, honor `Retry-After`, then retry |
 | `6` | network error / endpoint not enabled | check connectivity / profile |
 | `7` | validation / rejected manifest | fix input; treat manifest as untrusted |
+| `8` | outcome unknown: the call may have run | read the current state before retrying; retry with the same arguments only where the error says that is safe |
+
+An MCP tool call waits up to 150 seconds for the server's answer, longer than
+the 120 seconds the server allows its slowest tools, so the server's result or
+its own timeout refusal arrives first. Every other request waits up to 30
+seconds. A tool call whose answer never arrives (the CLI stopped waiting, the
+connection broke after the call was sent, or the server failed without answering
+it) exits `8`, never `6`: the call may have run. A call that never reached the
+server exits `6`.
 
 ## Error envelope
 
@@ -160,6 +169,12 @@ included whenever the response carried one — extracted from the `X-Request-Id`
 header or either backend error shape (the root `{errors:[…]}` envelope and the
 Connect `{error:{…}}` envelope are both understood). A corrective MCP tool result
 (e.g. `not_found`, an out-of-range tax year) is mapped to the matching exit code.
+A refused MCP tool call is mapped first by the fields the server states in its
+`structuredContent`: a call the server says may have run (`outcome: "unknown"`, or
+`attempted` without `outcome: "not_applied"`) exits `8`, even when it adds that a
+retry with the same arguments is safe; otherwise one it says is safe to retry
+(`safe_to_retry: true`) exits `5`. A refusal that states neither is mapped by its
+refusal code.
 
 ## Configuration
 
@@ -167,7 +182,7 @@ Connect `{error:{…}}` envelope are both understood). A corrective MCP tool res
 |---|---|---|---|
 | active profile | `GIVMO_PROFILE` | `production` | — |
 | API base | `GIVMO_API_BASE` | `https://mcp.givmo.io` | `https://mcp-dev.givmo.io` |
-| auth base | `GIVMO_AUTH_BASE` | `https://api.givmo.io` | `https://api-dev.givmo.io` |
+| auth base | `GIVMO_AUTH_BASE` | `https://mcp.givmo.io` | `https://api-dev.givmo.io` |
 | API key (CI) | `GIVMO_API_KEY` | — | — |
 | OAuth client id | `GIVMO_CLIENT_ID` | `givmo-cli` (built-in first-party connector id) | `givmo-cli` (built-in first-party connector id) |
 | OAuth client secret | `GIVMO_CLIENT_SECRET` | keychain / 0600 file | keychain / 0600 file |

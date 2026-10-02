@@ -22,14 +22,23 @@ const (
 	ExitAuth = 3
 	// ExitNotFound — the requested resource does not exist (HTTP 404).
 	ExitNotFound = 4
-	// ExitRateLimited — the server throttled the request (HTTP 429).
+	// ExitRateLimited — the server throttled the request (HTTP 429), or refused
+	// a tool call it says is safe to retry (turned away as busy, or a read that
+	// changed nothing). Back off, then retry.
 	ExitRateLimited = 5
 	// ExitNetwork — a transport-level failure (DNS, connection refused,
-	// timeout) or an endpoint not enabled in the active environment.
+	// timeout) or an endpoint not enabled in the active environment. A tool
+	// call lost after it was sent exits ExitOutcomeUnknown instead.
 	ExitNetwork = 6
 	// ExitValidation — input failed validation, or an untrusted donate.json
 	// manifest was rejected/sanitized with claims dropped.
 	ExitValidation = 7
+	// ExitOutcomeUnknown — a tool call was sent but its outcome is unknown: it
+	// may have run. The server said so, or no answer arrived (the CLI stopped
+	// waiting, or the connection broke after the call was sent). Read the
+	// current state before retrying; repeat the call only where the error says
+	// a retry with the same arguments is safe.
+	ExitOutcomeUnknown = 8
 )
 
 // CodeName returns the documented short name for an exit code, used in
@@ -52,6 +61,8 @@ func CodeName(code int) string {
 		return "network-error"
 	case ExitValidation:
 		return "validation-error"
+	case ExitOutcomeUnknown:
+		return "outcome-unknown"
 	default:
 		return "unknown"
 	}
