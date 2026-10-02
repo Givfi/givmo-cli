@@ -29,8 +29,9 @@ const (
 type Endpoints struct {
 	// APIBase is the REST + MCP host base (e.g. https://mcp.givmo.io).
 	APIBase string `json:"api_base"`
-	// AuthBase is the Givmo Connect authorization-server base (RFC 8414),
-	// e.g. https://api.givmo.io.
+	// AuthBase is the Givmo Connect authorization-server base (RFC 8414): its
+	// issuer, e.g. https://mcp.givmo.io. Login discovers the authorization server
+	// from the MCP host and falls back to this base when discovery fails.
 	AuthBase string `json:"auth_base"`
 }
 
@@ -50,14 +51,15 @@ type Config struct {
 }
 
 // defaultEndpoints returns the built-in base URLs for a known profile. The
-// production defaults point at the real hosts; the sandbox defaults point at a
-// dev host placeholder so nothing hard-breaks before the endpoints light up.
+// production defaults point at the real hosts, the authorization server's at its
+// issuer; the sandbox defaults point at a dev host placeholder so nothing
+// hard-breaks before the endpoints light up.
 func defaultEndpoints(profile string) Endpoints {
 	switch profile {
 	case ProfileProduction:
 		return Endpoints{
 			APIBase:  "https://mcp.givmo.io",
-			AuthBase: "https://api.givmo.io",
+			AuthBase: "https://mcp.givmo.io",
 		}
 	case ProfileSandbox:
 		return Endpoints{
@@ -68,6 +70,15 @@ func defaultEndpoints(profile string) Endpoints {
 	default:
 		return Endpoints{}
 	}
+}
+
+// retiredDefaults are built-in base URLs a profile used to default to and no
+// longer does. `config use-profile` writes a profile's defaults into the config
+// file, so a stored copy of one of these is the CLI's own earlier write, not a
+// choice: Resolve treats it as unset and applies today's default.
+var retiredDefaults = map[string]Endpoints{
+	// The production auth base before it was set to the issuer.
+	ProfileProduction: {AuthBase: "https://api.givmo.io"},
 }
 
 // KnownProfiles lists the profile names the CLI understands.
@@ -158,10 +169,11 @@ func (c *Config) Resolve(profileOverride string) (Profile, error) {
 	ep := defaultEndpoints(name)
 	if c.Profiles != nil {
 		if stored, ok := c.Profiles[name]; ok {
-			if stored.Endpoints.APIBase != "" {
+			retired := retiredDefaults[name]
+			if stored.Endpoints.APIBase != "" && stored.Endpoints.APIBase != retired.APIBase {
 				ep.APIBase = stored.Endpoints.APIBase
 			}
-			if stored.Endpoints.AuthBase != "" {
+			if stored.Endpoints.AuthBase != "" && stored.Endpoints.AuthBase != retired.AuthBase {
 				ep.AuthBase = stored.Endpoints.AuthBase
 			}
 		}

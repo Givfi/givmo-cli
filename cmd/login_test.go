@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/givfi/givmo-cli/internal/auth"
+	"github.com/givfi/givmo-cli/internal/config"
 	"github.com/givfi/givmo-cli/internal/output"
 )
 
@@ -78,6 +79,30 @@ func TestDiscoverAuthServer_FallsBackToConnectPaths(t *testing.T) {
 	}
 	if md.TokenEndpoint != "https://api-dev.givmo.io/connect/oauth/token" {
 		t.Errorf("fallback token = %q", md.TokenEndpoint)
+	}
+}
+
+// TestDiscoverAuthServer_ProductionFallbackIsTheIssuer: with discovery down, the
+// production profile's login falls back to the authorization server's issuer,
+// the MCP host, whose token endpoint is where the code is exchanged.
+func TestDiscoverAuthServer_ProductionFallbackIsTheIssuer(t *testing.T) {
+	t.Setenv("GIVMO_PROFILE", "")
+	t.Setenv("GIVMO_API_BASE", "")
+	t.Setenv("GIVMO_AUTH_BASE", "")
+	prof, err := (&config.Config{}).Resolve(config.ProfileProduction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, err := discoverAuthServer(context.Background(), failingDiscoverer{},
+		prof.Endpoints.APIBase, prof.Endpoints.AuthBase, !prof.IsProduction())
+	if err != nil {
+		t.Fatalf("discoverAuthServer: %v", err)
+	}
+	if md.Issuer != "https://mcp.givmo.io" {
+		t.Errorf("fallback issuer = %q, want https://mcp.givmo.io", md.Issuer)
+	}
+	if md.TokenEndpoint != "https://mcp.givmo.io/connect/oauth/token" {
+		t.Errorf("fallback token endpoint = %q", md.TokenEndpoint)
 	}
 }
 
