@@ -205,36 +205,34 @@ func (s *Server) handleInitialize(_ json.RawMessage) InitializeResult {
 	}
 }
 
-// tool is a single tools/list entry.
-type tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
-}
-
 func (s *Server) handleToolsList(ctx context.Context) (any, *rpcError) {
 	raw, rerr := s.remote.Forward(ctx, "tools/list", nil)
 	if rerr != nil {
 		return nil, rerr
 	}
-	// The remote returns a JSON-RPC result object { "tools": [...] }. Apply the
-	// optional allowlist filter.
+	// The remote returns a JSON-RPC result object { "tools": [...] }. Each tool is
+	// forwarded whole: its title, annotations, outputSchema and securitySchemes
+	// (which tells a client a tool needs sign-in) included, and any field the
+	// remote adds later. Only the name is read, for the optional allowlist filter.
 	var res struct {
-		Tools []tool `json:"tools"`
+		Tools []json.RawMessage `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, &rpcError{Code: codeInternalError, Message: "remote tools/list decode failed: " + err.Error()}
 	}
-	if s.toolFilt != nil {
-		filtered := res.Tools[:0]
-		for _, t := range res.Tools {
-			if s.toolFilt[t.Name] {
-				filtered = append(filtered, t)
+	tools := make([]json.RawMessage, 0, len(res.Tools))
+	for _, t := range res.Tools {
+		if s.toolFilt != nil {
+			var named struct {
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(t, &named) != nil || !s.toolFilt[named.Name] {
+				continue
 			}
 		}
-		res.Tools = filtered
+		tools = append(tools, t)
 	}
-	return map[string]any{"tools": res.Tools}, nil
+	return map[string]any{"tools": tools}, nil
 }
 
 func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (any, *rpcError) {
