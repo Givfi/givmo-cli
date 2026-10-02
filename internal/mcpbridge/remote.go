@@ -253,7 +253,7 @@ func toolCallUnanswered(cause string) *rpcError {
 	return &rpcError{
 		Code: codeInternalError,
 		Kind: KindOutcomeUnknown,
-		Message: "the tool call was sent to the remote MCP but no answer arrived (" + cause +
+		Message: "the tool call was sent to the remote MCP but its result never arrived (" + cause +
 			"); the call may have run and its outcome is unknown: read the current state before retrying",
 		Data: map[string]any{"outcome": "unknown", "attempted": true},
 	}

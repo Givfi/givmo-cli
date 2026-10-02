@@ -107,4 +107,15 @@ func TestValidateTaxYear_EasternTimeBoundary(t *testing.T) {
 	if err := validateTaxYearAt(1999, earlyJanuary); err == nil {
 		t.Error("before 2000 must fail")
 	}
+
+	// The Eastern New Year itself, five hours after UTC's: 04:30 UTC on 2027-01-01
+	// is still 2026 in New York, and 05:30 UTC is 2027.
+	beforeEasternMidnight := time.Date(2027, 1, 1, 4, 30, 0, 0, time.UTC)
+	if err := validateTaxYearAt(2028, beforeEasternMidnight); err == nil {
+		t.Error("at 04:30 UTC on 2027-01-01 it is still 2026 in New York, so 2028 must fail")
+	}
+	afterEasternMidnight := time.Date(2027, 1, 1, 5, 30, 0, 0, time.UTC)
+	if err := validateTaxYearAt(2028, afterEasternMidnight); err != nil {
+		t.Errorf("at 05:30 UTC on 2027-01-01 it is 2027 in New York, so 2028 must pass: %v", err)
+	}
 }

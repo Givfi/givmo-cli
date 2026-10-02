@@ -458,13 +458,19 @@ func TestCallTool_RefusalMapsByStructuredFields(t *testing.T) {
 
 // TestCallTool_RefusalWithoutDispositionKeepsCodeMapping pins the boundary: a
 // refusal whose structuredContent states neither an outcome nor a retry verdict
-// keeps the code-based mapping it had before the structured fields were read.
+// keeps the code-based mapping it had before the structured fields were read. A
+// recognized code keeps its remediation; a code the CLI does not recognize gets one
+// that claims nothing the CLI cannot know (the request may not be at fault, and a
+// write may already have run).
 func TestCallTool_RefusalWithoutDispositionKeepsCodeMapping(t *testing.T) {
+	const unrecognized = "This CLI does not recognize this refusal"
 	cases := []struct {
 		name       string
 		text       string
 		structured map[string]any
 		wantExit   int
+		wantRemedy string
+		notRemedy  string
 	}{
 		{
 			// The money tool's refusal: its structured code is the one it prefixes.
@@ -473,19 +479,25 @@ func TestCallTool_RefusalWithoutDispositionKeepsCodeMapping(t *testing.T) {
 			structured: map[string]any{
 				"source": "givmo_donation_intent", "refusal": "charity_inactive", "param": "charity_id",
 			},
-			wantExit: output.ExitValidation,
+			wantExit:   output.ExitValidation,
+			wantRemedy: "Adjust the request",
+			notRemedy:  unrecognized,
 		},
 		{
 			name:       "a domain refusal the CLI has no code for",
 			text:       "ExampleDomainRefusal: that record is not in a state that allows this change.",
 			structured: map[string]any{"source": "example_family", "refusal": "ExampleDomainRefusal"},
 			wantExit:   output.ExitValidation,
+			wantRemedy: unrecognized,
+			notRemedy:  "request/validation problem",
 		},
 		{
 			name:       "a safe_to_retry of the wrong type claims nothing",
 			text:       "ExampleDomainRefusal: refused.",
 			structured: map[string]any{"source": "example_family", "refusal": "ExampleDomainRefusal", "safe_to_retry": "yes"},
 			wantExit:   output.ExitValidation,
+			wantRemedy: unrecognized,
+			notRemedy:  "request/validation problem",
 		},
 	}
 	for _, tc := range cases {
@@ -499,8 +511,15 @@ func TestCallTool_RefusalWithoutDispositionKeepsCodeMapping(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected the refusal to surface as an error")
 			}
-			if got := output.AsError(err).Code; got != tc.wantExit {
-				t.Errorf("exit %d, want %d", got, tc.wantExit)
+			oe := output.AsError(err)
+			if oe.Code != tc.wantExit {
+				t.Errorf("exit %d, want %d", oe.Code, tc.wantExit)
+			}
+			if !strings.Contains(oe.Remediation, tc.wantRemedy) {
+				t.Errorf("remediation %q does not say %q", oe.Remediation, tc.wantRemedy)
+			}
+			if strings.Contains(oe.Remediation, tc.notRemedy) {
+				t.Errorf("remediation must not say %q; got %q", tc.notRemedy, oe.Remediation)
 			}
 		})
 	}

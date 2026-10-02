@@ -266,7 +266,9 @@ func toolErrorFromResult(tr mcpToolResult, name string) *output.Error {
 // auth-shaped code (a tool the grant's scope/audience does not include is reported
 // identically to one that does not exist at all), so it → ExitAuth. Every
 // donation-intent rejection and `invalid_arguments` is a request/domain refusal the
-// caller fixes by changing inputs → ExitValidation with the server's message.
+// caller fixes by changing inputs → ExitValidation with the server's message. A
+// refusal with no recognized code also exits ExitValidation, but its remediation
+// claims nothing the CLI cannot know.
 func toolErrorFromText(text, name, refusal string) *output.Error {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -306,7 +308,12 @@ func toolErrorFromText(text, name, refusal string) *output.Error {
 	if strings.Contains(lower, "not found") || strings.Contains(lower, "unknown tool") {
 		return authError()
 	}
-	return validationError()
+	// Still no recognized code. The refusal may not be the request's fault, and one
+	// that states no outcome may follow a write that already ran, so the remediation
+	// says only what the CLI knows.
+	return output.New(output.ExitValidation,
+		"the MCP tool '"+name+"' rejected the request: "+text,
+		"Act on the server's message. This CLI does not recognize this refusal, so it cannot say whether changing the request will help or whether a write already ran: read the current state before repeating a write.")
 }
 
 // inbandToolError inspects a successful tool payload for a corrective `error`
