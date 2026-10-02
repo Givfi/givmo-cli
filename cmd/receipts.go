@@ -70,19 +70,33 @@ Requires the givmo.receipts.read scope (run 'givmo login').`,
 	return cmd
 }
 
-// validateTaxYear bounds an explicitly-provided tax year. A zero year is allowed
+// validateTaxYear bounds an explicitly-provided tax year as the server does: from
+// 2000 through the year after the current Eastern-time year. A zero year is allowed
 // and means "let the server default to the current tax year" (the tool omits the
 // arg). Pure → unit-tested.
 func validateTaxYear(y int) error {
+	return validateTaxYearAt(y, time.Now())
+}
+
+// validateTaxYearAt is validateTaxYear at the instant now.
+func validateTaxYearAt(y int, now time.Time) error {
 	if y == 0 {
 		return nil
 	}
-	if y < 2000 || y > time.Now().Year()+1 {
+	if y < 2000 || y > easternYear(now)+1 {
 		return output.New(output.ExitValidation,
 			fmt.Sprintf("tax year %d is out of range", y),
 			"Pass a four-digit tax year within a reasonable range, or omit --tax-year for the current year.")
 	}
 	return nil
+}
+
+// easternYear is the calendar year in US Eastern time at now, the server's tax-year
+// boundary. Eastern time is UTC-5 around every New Year (daylight time runs from
+// March to November), so a fixed offset gives the exact year without a time-zone
+// database.
+func easternYear(now time.Time) int {
+	return now.UTC().Add(-5 * time.Hour).Year()
 }
 
 func newReceiptsSummaryCmd() *cobra.Command {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // receiptWithGroups is a get_receipt answer whose deductible total includes the
@@ -77,5 +78,33 @@ func TestReceiptSummary_OmitsGroupContributionsTheServerDidNotSend(t *testing.T)
 	out, _ := json.Marshal(r)
 	if strings.Contains(string(out), "group_contributions") {
 		t.Errorf("--json must not invent group contributions: %s", out)
+	}
+}
+
+// TestValidateTaxYear_EasternTimeBoundary pins the server's rule at New Year: the
+// latest accepted year is the year after the current Eastern-time year, whatever
+// the local clock says.
+func TestValidateTaxYear_EasternTimeBoundary(t *testing.T) {
+	// 2026-12-31 23:30 in Honolulu is already 2027-01-01 in New York.
+	honolulu := time.FixedZone("HST", -10*60*60)
+	lateDecember := time.Date(2026, 12, 31, 23, 30, 0, 0, honolulu)
+	if err := validateTaxYearAt(2028, lateDecember); err != nil {
+		t.Errorf("2028 is next year in Eastern time and must pass: %v", err)
+	}
+	if err := validateTaxYearAt(2029, lateDecember); err == nil {
+		t.Error("2029 is two years ahead in Eastern time and must fail")
+	}
+
+	// 2027-01-01 00:30 in Tokyo is still 2026-12-31 in New York.
+	tokyo := time.FixedZone("JST", 9*60*60)
+	earlyJanuary := time.Date(2027, 1, 1, 0, 30, 0, 0, tokyo)
+	if err := validateTaxYearAt(2027, earlyJanuary); err != nil {
+		t.Errorf("2027 is next year in Eastern time and must pass: %v", err)
+	}
+	if err := validateTaxYearAt(2028, earlyJanuary); err == nil {
+		t.Error("2028 is two years ahead in Eastern time and must fail")
+	}
+	if err := validateTaxYearAt(1999, earlyJanuary); err == nil {
+		t.Error("before 2000 must fail")
 	}
 }
