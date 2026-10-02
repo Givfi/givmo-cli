@@ -33,6 +33,13 @@ type receiptSummary struct {
 			Count int    `json:"count"`
 			Total string `json:"total"`
 		} `json:"wallet_deposits"`
+		// GroupContributions is the donor's own contributions to group wallets,
+		// part of deductible_total. Nil when the server's answer omits it, and
+		// then not shown.
+		GroupContributions *struct {
+			Count int    `json:"count"`
+			Total string `json:"total"`
+		} `json:"group_contributions,omitempty"`
 	} `json:"deductible_contributions"`
 	GrantRecommendations struct {
 		Count int    `json:"count"`
@@ -51,10 +58,11 @@ func newReceiptsCmd() *cobra.Command {
 		Long: `Show your consolidated tax-deductible giving to Givmo Charitable Fund for a
 tax year, via the get_receipt MCP tool.
 
-This is a single consolidated summary (deductible total + a direct-vs-wallet
-breakdown for the recipient of record, the Givmo Charitable Fund) — NOT a list of
-per-donation receipts, and NOT an official receipt. The Fund's emailed
-acknowledgments are the authoritative record.
+This is a single consolidated summary (deductible total + a breakdown into
+direct donations, wallet deposits and group-wallet contributions for the
+recipient of record, the Givmo Charitable Fund) — NOT a list of per-donation
+receipts, and NOT an official receipt. The Fund's emailed acknowledgments are the
+authoritative record.
 
 Requires the givmo.receipts.read scope (run 'givmo login').`,
 	}
@@ -106,26 +114,36 @@ func newReceiptsSummaryCmd() *cobra.Command {
 			if uerr := decodeToolPayload(payload, &r); uerr != nil {
 				return uerr
 			}
-			return app.Printer.Result(r, func(w io.Writer) {
-				output.KeyValues(w, [][2]string{
-					{"tax_year", strconv.Itoa(r.TaxYear)},
-					{"tax_year_basis", r.TaxYearBasis},
-					{"recipient", r.Recipient.Name},
-					{"recipient_ein", r.Recipient.EIN},
-					{"deductible_total", moneyWithCurrency(r.DeductibleTotal, r.Currency)},
-					{"direct_donations", fmt.Sprintf("%d (%s)", r.DeductibleContributions.DirectDonations.Count, moneyWithCurrency(r.DeductibleContributions.DirectDonations.Total, r.Currency))},
-					{"wallet_deposits", fmt.Sprintf("%d (%s)", r.DeductibleContributions.WalletDeposits.Count, moneyWithCurrency(r.DeductibleContributions.WalletDeposits.Total, r.Currency))},
-					{"grant_recommendations", fmt.Sprintf("%d (%s)", r.GrantRecommendations.Count, moneyWithCurrency(r.GrantRecommendations.Total, r.Currency))},
-					{"is_official_receipt", fmt.Sprintf("%t", r.IsOfficialReceipt)},
-				})
-				if r.Disclaimer != "" {
-					fmt.Fprintf(w, "\n%s\n", r.Disclaimer)
-				}
-			})
+			return app.Printer.Result(r, func(w io.Writer) { renderReceiptSummary(w, r) })
 		},
 	}
 	cmd.Flags().IntVar(&receiptsTaxYear, "tax-year", 0, "tax year (YYYY); omit for the current year")
 	return cmd
+}
+
+// renderReceiptSummary is the human form of a receipt summary.
+func renderReceiptSummary(w io.Writer, r receiptSummary) {
+	contributions := r.DeductibleContributions
+	pairs := [][2]string{
+		{"tax_year", strconv.Itoa(r.TaxYear)},
+		{"tax_year_basis", r.TaxYearBasis},
+		{"recipient", r.Recipient.Name},
+		{"recipient_ein", r.Recipient.EIN},
+		{"deductible_total", moneyWithCurrency(r.DeductibleTotal, r.Currency)},
+		{"direct_donations", fmt.Sprintf("%d (%s)", contributions.DirectDonations.Count, moneyWithCurrency(contributions.DirectDonations.Total, r.Currency))},
+		{"wallet_deposits", fmt.Sprintf("%d (%s)", contributions.WalletDeposits.Count, moneyWithCurrency(contributions.WalletDeposits.Total, r.Currency))},
+	}
+	if g := contributions.GroupContributions; g != nil {
+		pairs = append(pairs, [2]string{"group_contributions", fmt.Sprintf("%d (%s)", g.Count, moneyWithCurrency(g.Total, r.Currency))})
+	}
+	pairs = append(pairs,
+		[2]string{"grant_recommendations", fmt.Sprintf("%d (%s)", r.GrantRecommendations.Count, moneyWithCurrency(r.GrantRecommendations.Total, r.Currency))},
+		[2]string{"is_official_receipt", fmt.Sprintf("%t", r.IsOfficialReceipt)},
+	)
+	output.KeyValues(w, pairs)
+	if r.Disclaimer != "" {
+		fmt.Fprintf(w, "\n%s\n", r.Disclaimer)
+	}
 }
 
 // moneyWithCurrency renders a decimal-dollar money string with its currency,
