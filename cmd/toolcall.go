@@ -61,12 +61,25 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 		authHeader = cred.AuthorizationHeader()
 	}
 	remote := mcpbridge.NewHTTPRemote(a.mcpEndpoint(), authHeader, a.httpClient())
+	if a.toolCallTimeout > 0 {
+		remote.CallTimeout = a.toolCallTimeout
+	}
 	params, err := json.Marshal(map[string]any{"name": name, "arguments": args})
 	if err != nil {
 		return nil, output.New(output.ExitGeneric, "could not encode the MCP tool call: "+err.Error(), "")
 	}
 	raw, rerr := remote.Forward(ctx, "tools/call", json.RawMessage(params))
 	if rerr != nil {
+		msg := "remote MCP call failed: " + strings.TrimSpace(rerr.Message)
+		switch rerr.Kind {
+		case mcpbridge.KindOutcomeUnknown:
+			// Sent, never answered: the call may have run. Never "unreachable".
+			return nil, output.New(output.ExitOutcomeUnknown, msg,
+				"Read the current state before retrying (for example with the matching get or list command); a read-only command is safe to re-run.")
+		case mcpbridge.KindUnreachable:
+			return nil, output.New(output.ExitNetwork, msg,
+				"Check connectivity and the active profile's api_base (`givmo config view`); the MCP endpoint may not be enabled in this environment. Nothing was sent, so a retry is safe.")
+		}
 		// The bridge maps 401/403 to a message mentioning login; other transport
 		// failures are internal/invalid-request codes.
 		lower := strings.ToLower(rerr.Message)
@@ -80,7 +93,7 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 			code = output.ExitValidation
 			remediation = "Fix the request per the message and retry."
 		}
-		return nil, output.New(code, "remote MCP call failed: "+strings.TrimSpace(rerr.Message), remediation)
+		return nil, output.New(code, msg, remediation)
 	}
 	var tr mcpToolResult
 	if uerr := json.Unmarshal(raw, &tr); uerr != nil {

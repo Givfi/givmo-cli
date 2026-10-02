@@ -50,7 +50,26 @@ type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
+	// Kind classifies a failure the remote detected itself, for callers that
+	// branch on it (the CLI's own commands). It never reaches the wire.
+	Kind ErrorKind `json:"-"`
 }
+
+// ErrorKind classifies a failure of a request to the remote MCP.
+type ErrorKind int
+
+const (
+	// KindRemote is the remote's own JSON-RPC error, or a failure not classified
+	// below.
+	KindRemote ErrorKind = iota
+	// KindUnreachable: the request never reached the remote (DNS, connect, TLS,
+	// or a timeout before it was sent), so nothing ran.
+	KindUnreachable
+	// KindOutcomeUnknown: a tools/call was sent but no answer arrived (the CLI
+	// stopped waiting, the connection broke, or the remote failed without a
+	// JSON-RPC answer), so the call may have run.
+	KindOutcomeUnknown
+)
 
 // RemoteInvoker forwards a raw JSON-RPC message to the remote Givmo MCP and
 // returns the remote's raw JSON-RPC response body. It is an interface so tests

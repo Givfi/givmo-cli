@@ -27,15 +27,17 @@ const (
 	// changed nothing). Back off, then retry.
 	ExitRateLimited = 5
 	// ExitNetwork — a transport-level failure (DNS, connection refused,
-	// timeout) or an endpoint not enabled in the active environment.
+	// timeout) or an endpoint not enabled in the active environment. A tool
+	// call lost after it was sent exits ExitOutcomeUnknown instead.
 	ExitNetwork = 6
 	// ExitValidation — input failed validation, or an untrusted donate.json
 	// manifest was rejected/sanitized with claims dropped.
 	ExitValidation = 7
-	// ExitOutcomeUnknown — a tool call was sent but its outcome is unknown: the
-	// server says it may have run. Read the current state before retrying;
-	// repeat the call only where the error says a retry with the same arguments
-	// is safe.
+	// ExitOutcomeUnknown — a tool call was sent but its outcome is unknown: it
+	// may have run. The server said so, or no answer arrived (the CLI stopped
+	// waiting, or the connection broke after the call was sent). Read the
+	// current state before retrying; repeat the call only where the error says
+	// a retry with the same arguments is safe.
 	ExitOutcomeUnknown = 8
 )
 

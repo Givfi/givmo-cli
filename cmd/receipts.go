@@ -95,7 +95,7 @@ func newReceiptsSummaryCmd() *cobra.Command {
 			if receiptsTaxYear != 0 {
 				toolArgs["tax_year"] = receiptsTaxYear
 			}
-			ctx, cancel := baseContext()
+			ctx, cancel := toolContext()
 			defer cancel()
 
 			payload, err := app.callTool(ctx, "get_receipt", toolArgs, true, "givmo.receipts.read")

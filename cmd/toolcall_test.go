@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/givfi/givmo-cli/internal/auth"
 	"github.com/givfi/givmo-cli/internal/config"
@@ -522,5 +524,122 @@ func TestCallTool_StructuredRefusalCodeOutranksText(t *testing.T) {
 	}
 	if got := output.AsError(err).Code; got != output.ExitValidation {
 		t.Errorf("structured charity_inactive -> exit %d, want ExitValidation (%d)", got, output.ExitValidation)
+	}
+}
+
+// TestCallTool_ClientTimeoutIsOutcomeUnknownNeverUnreachable pins the CLI's own
+// timeout: a tool call the CLI stopped waiting for was sent, so it may have run.
+// It exits 8 and never reads as "unreachable" (which says nothing ran).
+func TestCallTool_ClientTimeoutIsOutcomeUnknownNeverUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	app := newTestAppCtx(t, srv.URL)
+	app.toolCallTimeout = 100 * time.Millisecond
+	t.Setenv("GIVMO_API_KEY", "tok")
+
+	_, err := app.callTool(context.Background(), "example_write", map[string]any{}, true, "example.scope")
+	if err == nil {
+		t.Fatal("expected the lost answer to surface as an error")
+	}
+	oe := output.AsError(err)
+	if oe.Code != output.ExitOutcomeUnknown {
+		t.Errorf("client-side timeout -> exit %d, want ExitOutcomeUnknown (%d)", oe.Code, output.ExitOutcomeUnknown)
+	}
+	if !strings.Contains(oe.Message, "may have run") {
+		t.Errorf("message must say the call may have run: %q", oe.Message)
+	}
+	if !strings.Contains(oe.Remediation, "Read the current state before retrying") {
+		t.Errorf("remediation must say to read before retrying: %q", oe.Remediation)
+	}
+	for _, s := range []string{oe.Message, oe.Remediation} {
+		if strings.Contains(strings.ToLower(s), "unreachable") {
+			t.Errorf("a sent call must never read as unreachable: %q", s)
+		}
+	}
+}
+
+// TestCallTool_UnreachableIsNetworkExit pins the other side: a call that never
+// reached the server exits 6, the documented network exit, and says nothing ran.
+func TestCallTool_UnreachableIsNetworkExit(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	app := newTestAppCtx(t, "http://"+addr)
+
+	_, cerr := app.callTool(context.Background(), "search_charities", map[string]any{"query": "water"}, false, "")
+	if cerr == nil {
+		t.Fatal("expected an unreachable endpoint to fail")
+	}
+	oe := output.AsError(cerr)
+	if oe.Code != output.ExitNetwork {
+		t.Errorf("unreachable -> exit %d, want ExitNetwork (%d)", oe.Code, output.ExitNetwork)
+	}
+	if !strings.Contains(oe.Remediation, "Nothing was sent") {
+		t.Errorf("remediation must say nothing was sent: %q", oe.Remediation)
+	}
+}
+
+func TestToolContext_HasNoDeadline(t *testing.T) {
+	ctx, cancel := toolContext()
+	defer cancel()
+	if d, ok := ctx.Deadline(); ok {
+		t.Errorf("a tool command's context must not cut its calls; it has deadline %s", d)
+	}
+}
+
+// TestDonationIntentsCreate_UnknownOutcomeNamesTheIdempotencyKey: no consumer tool
+// reads a donation intent back, so on an unknown outcome the safe next step is a
+// retry with the same idempotency key, which the remediation must name.
+func TestDonationIntentsCreate_UnknownOutcomeNamesTheIdempotencyKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close() // the call was received; its answer is lost
+	}))
+	defer srv.Close()
+	t.Setenv("GIVMO_HOME", t.TempDir())
+	t.Setenv("GIVMO_TOKEN_BACKEND", "file")
+	t.Setenv("GIVMO_PROFILE", "sandbox")
+	t.Setenv("GIVMO_API_BASE", srv.URL)
+	t.Setenv("GIVMO_API_KEY", "tok")
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"caller's key", []string{"--charity", "ch_1", "--amount", "2500", "--idempotency-key", "my-key-1"}, "--idempotency-key my-key-1"},
+		{"generated key", []string{"--charity", "ch_1", "--amount", "2500"}, "--idempotency-key cli-"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newDonationIntentsCreateCmd()
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs(tc.args)
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("expected the lost answer to fail the create")
+			}
+			oe := output.AsError(err)
+			if oe.Code != output.ExitOutcomeUnknown {
+				t.Errorf("exit %d, want ExitOutcomeUnknown (%d)", oe.Code, output.ExitOutcomeUnknown)
+			}
+			if !strings.Contains(oe.Remediation, tc.want) {
+				t.Errorf("remediation must name the key (%q): %q", tc.want, oe.Remediation)
+			}
+		})
 	}
 }

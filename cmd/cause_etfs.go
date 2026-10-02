@@ -63,7 +63,7 @@ func newCauseETFsListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, cancel := baseContext()
+			ctx, cancel := toolContext()
 			defer cancel()
 
 			payload, err := app.callTool(ctx, "list_cause_etfs", map[string]any{}, false, "")
@@ -99,7 +99,7 @@ func newCauseETFsGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, cancel := baseContext()
+			ctx, cancel := toolContext()
 			defer cancel()
 
 			payload, err := app.callTool(ctx, "get_cause_etf", map[string]any{"etf_id": args[0]}, false, "")

@@ -139,6 +139,13 @@ Scripts and AI agents can branch on these deterministically (defined once in
 | `7` | validation / rejected manifest | fix input; treat manifest as untrusted |
 | `8` | outcome unknown: the call may have run | read the current state before retrying; retry with the same arguments only where the error says that is safe |
 
+An MCP tool call waits up to 150 seconds for the server's answer, longer than
+the 120 seconds the server allows its slowest tools, so the server's result or
+its own timeout refusal arrives first. Every other request waits up to 30
+seconds. A tool call whose answer never arrives (the CLI stopped waiting, or the
+connection broke after the call was sent) exits `8`, never `6`: the call may
+have run. A call that never reached the server exits `6`.
+
 ## Error envelope
 
 Every error — local or from the backend — renders through **one** envelope. With
