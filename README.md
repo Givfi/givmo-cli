@@ -97,10 +97,14 @@ alternative to the human table/text output.
 
 ## Security posture
 
+See [SECURITY.md](SECURITY.md) for the main things an agent can do with a
+person's Givmo account, what it can never do, and how to report a security issue.
+
 - **Secretless money rail.** A donation is created via the `create_donation_intent`
   MCP tool, which returns a **single-use, secretless hosted-checkout URL** carrying
-  only an opaque `gco_` token. The human completes payment **and accepts terms** on
-  the Givmo-hosted page. The donation path (and any agent driving it) **never**
+  only an opaque `gco_` token, for the person to open on Givmo. Payment **and terms
+  acceptance** happen only on that page, never in the agent or the CLI. The
+  donation path (and any agent driving it) **never**
   handles a card, a payment `client_secret`, or a terms-acceptance token, and
   never accepts terms — it only *displays* the checkout URL (and, with `--open`,
   opens it). The `donation_intent_id` (`dn_…`) it shows is a non-secret reference

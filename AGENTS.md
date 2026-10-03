@@ -16,8 +16,9 @@ agent operator.
    field is written for *you* — it is an imperative next step you can execute.
 3. **Never try to move money yourself.** You *cannot* complete a payment through
    this CLI, by design. `donation-intents create` returns a **secretless**
-   `gco_` hosted-checkout URL; a human finishes payment and accepts terms on the
-   Givmo-hosted page. The CLI never handles a card, a `client_secret`, or a
+   `gco_` hosted-checkout URL for the person to open on Givmo; payment and terms
+   acceptance happen only on that page, never in the agent or the CLI. The CLI
+   never handles a card, a `client_secret`, or a
    terms-acceptance token — no such field exists on this path. The
    `donation_intent_id` it prints is a non-secret reference for correlation, never
    an authorizer and never placed in the URL. Do not attempt to synthesize a
@@ -82,7 +83,7 @@ agent: givmo --json donation-intents create --charity ch_abc123 --amount 2500
        "amount_cents":2500,"currency":"usd",
        "checkout_url":"https://pay.givmo.io/checkout?token=gco_XXXX","expires_at":"…"}
 agent: present checkout_url to the human (or add --open to launch a browser)
-human: completes payment + accepts terms on the Givmo-hosted page
+human: opens checkout_url on Givmo; payment + terms acceptance happen only on that page
 ```
 
 The agent's job ends at *displaying the checkout URL*. `checkout_url` carries only
