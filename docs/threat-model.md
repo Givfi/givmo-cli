@@ -77,7 +77,7 @@ each is a legal or financial predicate, not a UX preference:
 | **Who may be paid** | An allowlist of IRS-verified qualified charities, resolved against IRS authoritative data — never a charity's self-attestation, never a natural person. | May *recommend* a recipient; may not *determine* eligibility. |
 | **Whether a gift is deductible, and what a receipt says** | Fixed by GCF, server-side, from a versioned copy registry. | May surface a link to the GCF-issued receipt; may not draft, sign, or generate one. |
 | **Whether terms are accepted and money moves** | Only by a terms-accepted human on the Givmo-hosted page. | Never the donor; never accepts terms; never holds a card or secret. |
-| **Sanctions screening** | OFAC screening of donors and recipient charities, applied regardless of anything the agent decides. | None — the screen runs independent of the agent. |
+| **Sanctions screening** | OFAC screening of recipient charities, applied regardless of anything the agent decides. | None — the screen runs independent of the agent. |
 | **Caps, kill switches, second-model review** | Bound any contingent or internal disbursement; each remains GCF's own declinable act. | None — these bound the system, not the conversation. |
 
 The phrase that captures the recipient-eligibility floor is **"pre-screen the
@@ -164,8 +164,8 @@ to an OFAC-sanctioned "charity" — using the platform as a rinse cycle.
   value back out. This structural property is the primary AML mitigant: the
   worst case is money reaching a verified charity, not an attacker.
 - **OFAC / sanctions screening as a deterministic floor.** OFAC/sanctions
-  screening is applied as a deterministic floor to donors and recipient
-  charities, regardless of anything the agent decides. By design, the charity
+  screening is applied as a deterministic floor to recipient charities,
+  regardless of anything the agent decides. By design, the charity
   research corpus excludes OFAC-listed organizations at ingestion, so that once
   the corpus backs search they are unreachable through every search, profile, and
   render path — not merely blocked at checkout. **The corpus-backed research
@@ -563,7 +563,7 @@ model exists to prevent:
 
 | # | Threat class | Primary control(s) |
 |---|---|---|
-| 1 | **AML / sanctions (OFAC)** | No cash-out/refund/peer-transfer vector — value can only become a completed gift to GCF and only be granted to an IRS-verified charity · OFAC screening of donors and recipients as a deterministic floor · corpus excludes OFAC-listed orgs at ingestion *by design* (corpus-backed search is a roadmap phase; until then, screening holds at the settlement/grant floor and end-to-end corpus exclusion is a pre-launch verification gate) · qualified-payee allowlist. Committed controls, not an exemption. |
+| 1 | **AML / sanctions (OFAC)** | No cash-out/refund/peer-transfer vector — value can only become a completed gift to GCF and only be granted to an IRS-verified charity · OFAC screening of recipient charities as a deterministic floor · corpus excludes OFAC-listed orgs at ingestion *by design* (corpus-backed search is a roadmap phase; until then, screening holds at the settlement/grant floor and end-to-end corpus exclusion is a pre-launch verification gate) · qualified-payee allowlist. Committed controls, not an exemption. |
 | 2 | **Account compromise (token theft, consent phishing)** | Compromise cannot exfiltrate value (irrevocable gift, no retrieval right) · agent holds only a secretless single-use `gco_` URL — no card/secret · four narrow revocable scopes · 30-min access tokens + rotating refresh with reuse-detection/family-revocation · **immediate server-side one-tap revocation** · bad bearers rejected, never downgraded · truthful anti-phishing consent screen. |
 | 3 | **Sock-puppet / fraudulent charities** | Eligibility resolved against **IRS authoritative data (Pub 78/TEOS, BMF, Auto-Revocation), never self-attestation** · pre-screened at listing, **re-confirmed at settlement**, eligible-alternate selection on failure · good-standing default, research-only orgs get no donate chips. |
 | 4 | **Manifest injection (`donate.json` + IRS filings as untrusted text)** | Untrusted-text-is-data: field-level control/tag-char stripping + JSON encoding + provenance on `/mcp`; fail-closed injection screen on the in-process loop · **authority pinned off-manifest** (IRS data for routing/eligibility; server-authored versioned immutable registry for all legal/receipt copy) · corpus grounded only on IRS-direct + Wikidata CC0 · no model-authored URLs. |
@@ -641,8 +641,9 @@ program's representations *about itself*, not only its giving copy. Accordingly:
   netted from the gift — and never "100% reaches [named charity]," since GCF
   directs the grant and the named charity may not receive it.
 - **No AML/KYC "exemption" claim.** The donee model is not money transmission and
-  needs no MSB registration for that flow — and OFAC screening applies regardless
-  and is committed to. Controls are described; exemptions are not asserted.
+  needs no MSB registration for that flow — and OFAC screening of recipient
+  charities applies regardless and is committed to. Controls are described;
+  exemptions are not asserted.
 - **No "conduit" / "pass-through" language.** GCF is not a conduit; the donor does
   not "send money to the charity through Givmo." The correct framing is
   advisory/grant + GCF exclusive legal control + genuine variance power.
@@ -660,6 +661,9 @@ program's representations *about itself*, not only its giving copy. Accordingly:
 ## 13. Version & provenance
 
 - **Document version:** v1.1 — 2026-07-24.
+- **Correction, 2026-10-03:** the sanctions-screening statements (§2, §4.1, §10,
+  §12) now describe what Givmo screens: recipient charities. They no longer say
+  Givmo screens donors.
 - **Applies to:** the Givmo MCP surface v1 (Rung 1 and the internal operator
   tier live in production; Rungs 2–3 gated future phases). Companion artifacts:
   the `donate.json` manifest spec v1.0 and the `givmo` CLI, both in this bundle.
