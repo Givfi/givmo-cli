@@ -32,9 +32,10 @@ Givmo exposes one remote MCP server (https://mcp.givmo.io/mcp) plus a REST API.
 This CLI serves the PUBLIC (catalog) and CONSUMER (user-delegated OAuth) tiers.
 
 MONEY SAFETY: a donation is created via a secretless, single-use hosted-checkout
-URL (a "gco_" token). The human completes payment and accepts terms on the
-Givmo-hosted page. This donation path never handles a card or payment credential
-and never accepts terms. It only DISPLAYS the checkout URL.
+URL (a "gco_" token). Payment and terms acceptance happen only on Givmo's
+checkout page, which is not available yet, so no donation can be completed
+through this CLI today. This donation path never handles a card or payment
+credential and never accepts terms. It only DISPLAYS the checkout URL.
 
 UNTRUSTED INPUT: donate.json manifests are treated as hostile. The manifest
 commands surface every rejected/sanitized claim.

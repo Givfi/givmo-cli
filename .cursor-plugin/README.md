@@ -26,11 +26,11 @@ Three live consumer capabilities:
 - **Search charities** — find real charities by name or cause.
 - **Read your linked giving** — after linking your Givmo account, review your
   own donation history.
-- **Start a donation** — the agent prepares a donation and hands you a `gco_…`
-  checkout link that **you** complete.
+- **Start a donation** — payment happens only on Givmo's own checkout page, which
+  is not available yet, so no donation can be completed through an agent today.
 
-**Honest capability note:** the agent **cannot donate for you** — every donation
-ends in a secretless, human-completed checkout. No autonomous/agentic giving. It
+**Honest capability note:** the agent **cannot donate for you**; payment happens
+only on Givmo's own checkout page, which is not available yet. No autonomous/agentic giving. It
 does **not** provide corpus-backed charity research, impact ratings, or
 deductibility determinations; search is name/cause lookup.
 

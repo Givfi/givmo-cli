@@ -15,12 +15,12 @@ import (
 // create_donation_intent MCP tool result.
 //
 // MONEY-SAFETY CONTRACT: the ONLY actionable field is CheckoutURL — a secretless,
-// single-use, Givmo-hosted checkout link carrying an opaque `gco_` token. The
-// human completes payment and accepts terms on that page. This struct has NO field
-// for a card, a client_secret, or a terms-acceptance token; the tool never returns
-// a client_secret on this path. DonationIntentID (a `dn_…` id) is a non-secret
-// resource reference — surfaced for correlation, NEVER an authorizer and never
-// placed in a URL.
+// single-use, Givmo-hosted checkout link carrying an opaque `gco_` token, for the
+// person to open on Givmo; payment and terms acceptance happen only on that page.
+// This struct has NO field for a card, a client_secret, or a terms-acceptance
+// token; the tool never returns a client_secret on this path. DonationIntentID
+// (a `dn_…` id) is a non-secret resource reference — surfaced for correlation,
+// NEVER an authorizer and never placed in a URL.
 type donationIntent struct {
 	DonationIntentID string `json:"donation_intent_id"`
 	Status           string `json:"status,omitempty"`
@@ -52,8 +52,9 @@ func newDonationIntentsCmd() *cobra.Command {
 		Long: `Create a donation intent via the create_donation_intent MCP tool.
 
 MONEY SAFETY: 'create' returns a secretless, single-use hosted-checkout URL (a
-gco_ token). Payment and terms acceptance happen on the Givmo-hosted page in a
-browser. This CLI never handles a card, a client secret, or a donation id, and
+gco_ token). Payment and terms acceptance happen only on Givmo's checkout page,
+which is not available yet, so no donation can be completed through this CLI
+today. This CLI never handles a card, a client secret, or a donation id, and
 never accepts terms — it only displays (or, with --open, opens) the checkout URL.
 
 Requires the givmo.donation_intents.create scope (run 'givmo login').`,
@@ -169,13 +170,13 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 				}
 			}
 			return app.Printer.Result(di, func(w io.Writer) {
-				fmt.Fprintln(w, "Donation intent created. Complete payment + terms in the browser:")
+				fmt.Fprintln(w, "Donation intent created. Payment happens only on Givmo's checkout page, which is not available yet:")
 				fmt.Fprintf(w, "\n  %s\n\n", di.CheckoutURL)
 				donationIntentKeyValues(w, di)
 				if generated {
 					fmt.Fprintf(w, "idempotency_key: %s (reuse it on a retry to avoid a second charge)\n", idemKey)
 				}
-				fmt.Fprintln(w, "\nNote: this CLI never handles your card or accepts terms; that happens on the Givmo-hosted page.")
+				fmt.Fprintln(w, "\nNote: this CLI never handles your card or accepts terms; payment and terms acceptance happen only on the Givmo page.")
 			})
 		},
 	}
