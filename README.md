@@ -61,8 +61,8 @@ givmo charities get ch_abc123          # opaque charity_id from search (EIN also
 givmo cause-etfs list
 givmo cause-etfs get <etf-id>
 
-# 4. Create a donation — you get a SECRETLESS hosted-checkout URL.
-givmo donation-intents create --charity ch_abc123 --amount 2500 --open
+# 4. Create a donation intent (Givmo's checkout page is not available yet).
+givmo donation-intents create --charity ch_abc123 --amount 2500
 givmo donation-intents create --cause-etf cetf_123 --amount 5000   # donate to a basket
 
 # 5. Your tax-deductible giving summary for a year.
@@ -102,9 +102,10 @@ person's Givmo account, what it can never do, and how to report a security issue
 
 - **Secretless money rail.** A donation is created via the `create_donation_intent`
   MCP tool, which returns a **single-use, secretless hosted-checkout URL** carrying
-  only an opaque `gco_` token, for the person to open on Givmo. Payment **and terms
-  acceptance** happen only on that page, never in the agent or the CLI. The
-  donation path (and any agent driving it) **never**
+  only an opaque `gco_` token. Payment **and terms acceptance** happen only on
+  Givmo's checkout page, never in the agent or the CLI, and that page is not
+  available yet: no donation can be completed through an agent or the CLI today.
+  The donation path (and any agent driving it) **never**
   handles a card, a payment `client_secret`, or a terms-acceptance token, and
   never accepts terms — it only *displays* the checkout URL (and, with `--open`,
   opens it). The `donation_intent_id` (`dn_…`) it shows is a non-secret reference

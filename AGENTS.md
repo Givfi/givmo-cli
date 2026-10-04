@@ -16,9 +16,10 @@ agent operator.
    field is written for *you* — it is an imperative next step you can execute.
 3. **Never try to move money yourself.** You *cannot* complete a payment through
    this CLI, by design. `donation-intents create` returns a **secretless**
-   `gco_` hosted-checkout URL for the person to open on Givmo; payment and terms
-   acceptance happen only on that page, never in the agent or the CLI. The CLI
-   never handles a card, a `client_secret`, or a
+   `gco_` hosted-checkout URL; payment and terms acceptance happen only on
+   Givmo's checkout page, never in the agent or the CLI. That page is not
+   available yet, so no donation can be completed through an agent or this CLI
+   today. The CLI never handles a card, a `client_secret`, or a
    terms-acceptance token — no such field exists on this path. The
    `donation_intent_id` it prints is a non-secret reference for correlation, never
    an authorizer and never placed in the URL. Do not attempt to synthesize a
@@ -65,7 +66,7 @@ agent operator.
 | find a charity | `givmo --json charities search "<q>" [--ein <EIN>]` (name/keyword and/or exact EIN) |
 | fetch a charity | `givmo --json charities get <charity_id\|EIN>` (opaque `ch_…`; EIN also accepted) |
 | list/inspect Cause ETFs | `givmo --json cause-etfs list` · `givmo --json cause-etfs get <id>` |
-| **start a donation** | `givmo --json donation-intents create (--charity <ch_id> \| --cause-etf <cetf_id>) --amount <cents>` → **hand the `checkout_url` to the human** |
+| **start a donation** | `givmo --json donation-intents create (--charity <ch_id> \| --cause-etf <cetf_id>) --amount <cents>` → Givmo's checkout page is not available yet (rule 3) |
 | tax giving summary | `givmo --json receipts summary --tax-year <YYYY>` (consolidated deductible total; not a per-receipt list) |
 | validate a manifest | `givmo --json manifest validate <file\|https-url>` |
 | sign a manifest | `givmo manifest sign <file> --key <ed25519-key>` |
@@ -81,9 +82,9 @@ agent operator.
 agent: givmo --json donation-intents create --charity ch_abc123 --amount 2500
    -> {"donation_intent_id":"dn_…","status":"requires_payment","charity_id":"ch_abc123",
        "amount_cents":2500,"currency":"usd",
-       "checkout_url":"https://pay.givmo.io/checkout?token=gco_XXXX","expires_at":"…"}
-agent: present checkout_url to the human (or add --open to launch a browser)
-human: opens checkout_url on Givmo; payment + terms acceptance happen only on that page
+       "checkout_url":"https://…/checkout?token=gco_XXXX","expires_at":"…"}
+agent: tell the human that payment + terms acceptance happen only on Givmo's
+       checkout page, which is not available yet: no donation can be completed today
 ```
 
 The agent's job ends at *displaying the checkout URL*. `checkout_url` carries only

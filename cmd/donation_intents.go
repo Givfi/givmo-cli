@@ -52,8 +52,9 @@ func newDonationIntentsCmd() *cobra.Command {
 		Long: `Create a donation intent via the create_donation_intent MCP tool.
 
 MONEY SAFETY: 'create' returns a secretless, single-use hosted-checkout URL (a
-gco_ token) for the person to open on Givmo. Payment and terms acceptance happen
-only on that page. This CLI never handles a card, a client secret, or a donation id, and
+gco_ token). Payment and terms acceptance happen only on Givmo's checkout page,
+which is not available yet, so no donation can be completed through this CLI
+today. This CLI never handles a card, a client secret, or a donation id, and
 never accepts terms — it only displays (or, with --open, opens) the checkout URL.
 
 Requires the givmo.donation_intents.create scope (run 'givmo login').`,
@@ -169,7 +170,7 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 				}
 			}
 			return app.Printer.Result(di, func(w io.Writer) {
-				fmt.Fprintln(w, "Donation intent created. Open this link on Givmo; payment and terms acceptance happen only on that page:")
+				fmt.Fprintln(w, "Donation intent created. Payment happens only on Givmo's checkout page, which is not available yet:")
 				fmt.Fprintf(w, "\n  %s\n\n", di.CheckoutURL)
 				donationIntentKeyValues(w, di)
 				if generated {
