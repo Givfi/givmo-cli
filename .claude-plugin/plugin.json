@@ -3,7 +3,7 @@
   "name": "givmo",
   "displayName": "Givmo Giving",
   "version": "0.1.0",
-  "description": "Search real charities, read your own linked Givmo giving, and start a donation that you complete in a secretless human checkout. The agent never moves money — it hands off a checkout link.",
+  "description": "Search real charities and read your own linked Givmo giving. The agent never moves money; payment happens only on Givmo's own checkout page, which is not available yet.",
   "author": {
     "name": "Givmo",
     "url": "https://givmo.io"
