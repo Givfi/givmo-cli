@@ -50,10 +50,9 @@ type Config struct {
 	Profiles map[string]Profile `json:"profiles,omitempty"`
 }
 
-// defaultEndpoints returns the built-in base URLs for a known profile. The
-// production defaults point at the real hosts, the authorization server's at its
-// issuer; the sandbox defaults point at a dev host placeholder so nothing
-// hard-breaks before the endpoints light up.
+// defaultEndpoints returns the built-in base URLs for a known profile. Each
+// profile's defaults point at its MCP host, which is also its authorization
+// server's issuer: production's real hosts, the sandbox's the dev ones.
 func defaultEndpoints(profile string) Endpoints {
 	switch profile {
 	case ProfileProduction:
@@ -63,9 +62,9 @@ func defaultEndpoints(profile string) Endpoints {
 		}
 	case ProfileSandbox:
 		return Endpoints{
-			// Sandbox / dev host placeholder — overridable per-profile.
+			// The dev MCP host and its issuer — overridable per-profile.
 			APIBase:  "https://mcp-dev.givmo.io",
-			AuthBase: "https://api-dev.givmo.io",
+			AuthBase: "https://mcp-dev.givmo.io",
 		}
 	default:
 		return Endpoints{}
@@ -79,6 +78,8 @@ func defaultEndpoints(profile string) Endpoints {
 var retiredDefaults = map[string]Endpoints{
 	// The production auth base before it was set to the issuer.
 	ProfileProduction: {AuthBase: "https://api.givmo.io"},
+	// The sandbox auth base before dev's issuer moved to its MCP host.
+	ProfileSandbox: {AuthBase: "https://api-dev.givmo.io"},
 }
 
 // KnownProfiles lists the profile names the CLI understands.

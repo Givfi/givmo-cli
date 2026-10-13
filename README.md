@@ -187,7 +187,7 @@ refusal code.
 |---|---|---|---|
 | active profile | `GIVMO_PROFILE` | `production` | — |
 | API base | `GIVMO_API_BASE` | `https://mcp.givmo.io` | `https://mcp-dev.givmo.io` |
-| auth base | `GIVMO_AUTH_BASE` | `https://mcp.givmo.io` | `https://api-dev.givmo.io` |
+| auth base | `GIVMO_AUTH_BASE` | `https://mcp.givmo.io` | `https://mcp-dev.givmo.io` |
 | API key (CI) | `GIVMO_API_KEY` | — | — |
 | OAuth client id | `GIVMO_CLIENT_ID` | `givmo-cli` (built-in first-party connector id) | `givmo-cli` (built-in first-party connector id) |
 | OAuth client secret | `GIVMO_CLIENT_SECRET` | keychain / 0600 file | keychain / 0600 file |
