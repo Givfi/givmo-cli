@@ -32,42 +32,49 @@ func TestResolve_StoredRetiredDefaultYieldsToTheIssuer(t *testing.T) {
 	t.Setenv("GIVMO_API_BASE", "")
 	t.Setenv("GIVMO_AUTH_BASE", "")
 
-	// What `config use-profile production` wrote before the default changed.
-	c := &Config{
-		ActiveProfile: ProfileProduction,
-		Profiles: map[string]Profile{
-			ProfileProduction: {Name: ProfileProduction, Endpoints: Endpoints{
-				APIBase:  "https://mcp.givmo.io",
-				AuthBase: "https://api.givmo.io",
-			}},
-		},
-	}
-	prof, err := c.Resolve("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prof.Endpoints.AuthBase != "https://mcp.givmo.io" {
-		t.Errorf("a stored retired default must resolve to the issuer, got %q", prof.Endpoints.AuthBase)
-	}
+	for _, tc := range []struct{ profile, apiBase, retired, issuer string }{
+		{ProfileProduction, "https://mcp.givmo.io", "https://api.givmo.io", "https://mcp.givmo.io"},
+		{ProfileSandbox, "https://mcp-dev.givmo.io", "https://api-dev.givmo.io", "https://mcp-dev.givmo.io"},
+	} {
+		t.Run(tc.profile, func(t *testing.T) {
+			// What `config use-profile <profile>` wrote before the default changed.
+			c := &Config{
+				ActiveProfile: tc.profile,
+				Profiles: map[string]Profile{
+					tc.profile: {Name: tc.profile, Endpoints: Endpoints{
+						APIBase:  tc.apiBase,
+						AuthBase: tc.retired,
+					}},
+				},
+			}
+			prof, err := c.Resolve("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prof.Endpoints.AuthBase != tc.issuer {
+				t.Errorf("a stored retired default must resolve to the issuer %s, got %q", tc.issuer, prof.Endpoints.AuthBase)
+			}
 
-	// Any other stored value is the user's choice and stands.
-	c.Profiles[ProfileProduction] = Profile{Name: ProfileProduction, Endpoints: Endpoints{AuthBase: "https://auth.example.test"}}
-	prof, err = c.Resolve("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prof.Endpoints.AuthBase != "https://auth.example.test" {
-		t.Errorf("a stored custom auth_base must stand, got %q", prof.Endpoints.AuthBase)
-	}
+			// Any other stored value is the user's choice and stands.
+			c.Profiles[tc.profile] = Profile{Name: tc.profile, Endpoints: Endpoints{AuthBase: "https://auth.example.test"}}
+			prof, err = c.Resolve("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prof.Endpoints.AuthBase != "https://auth.example.test" {
+				t.Errorf("a stored custom auth_base must stand, got %q", prof.Endpoints.AuthBase)
+			}
 
-	// The environment still wins over everything.
-	t.Setenv("GIVMO_AUTH_BASE", "https://api.givmo.io")
-	prof, err = c.Resolve("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prof.Endpoints.AuthBase != "https://api.givmo.io" {
-		t.Errorf("GIVMO_AUTH_BASE must override, got %q", prof.Endpoints.AuthBase)
+			// The environment still wins over everything.
+			t.Setenv("GIVMO_AUTH_BASE", tc.retired)
+			prof, err = c.Resolve("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prof.Endpoints.AuthBase != tc.retired {
+				t.Errorf("GIVMO_AUTH_BASE must override, got %q", prof.Endpoints.AuthBase)
+			}
+		})
 	}
 }
 

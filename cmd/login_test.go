@@ -82,27 +82,34 @@ func TestDiscoverAuthServer_FallsBackToConnectPaths(t *testing.T) {
 	}
 }
 
-// TestDiscoverAuthServer_ProductionFallbackIsTheIssuer: with discovery down, the
-// production profile's login falls back to the authorization server's issuer,
-// the MCP host, whose token endpoint is where the code is exchanged.
-func TestDiscoverAuthServer_ProductionFallbackIsTheIssuer(t *testing.T) {
+// TestDiscoverAuthServer_FallbackIsTheIssuer: with discovery down, each
+// profile's login falls back to its authorization server's issuer, the MCP
+// host, whose token endpoint is where the code is exchanged.
+func TestDiscoverAuthServer_FallbackIsTheIssuer(t *testing.T) {
 	t.Setenv("GIVMO_PROFILE", "")
 	t.Setenv("GIVMO_API_BASE", "")
 	t.Setenv("GIVMO_AUTH_BASE", "")
-	prof, err := (&config.Config{}).Resolve(config.ProfileProduction)
-	if err != nil {
-		t.Fatal(err)
-	}
-	md, err := discoverAuthServer(context.Background(), failingDiscoverer{},
-		prof.Endpoints.APIBase, prof.Endpoints.AuthBase, !prof.IsProduction())
-	if err != nil {
-		t.Fatalf("discoverAuthServer: %v", err)
-	}
-	if md.Issuer != "https://mcp.givmo.io" {
-		t.Errorf("fallback issuer = %q, want https://mcp.givmo.io", md.Issuer)
-	}
-	if md.TokenEndpoint != "https://mcp.givmo.io/connect/oauth/token" {
-		t.Errorf("fallback token endpoint = %q", md.TokenEndpoint)
+	for _, tc := range []struct{ profile, issuer string }{
+		{config.ProfileProduction, "https://mcp.givmo.io"},
+		{config.ProfileSandbox, "https://mcp-dev.givmo.io"},
+	} {
+		t.Run(tc.profile, func(t *testing.T) {
+			prof, err := (&config.Config{}).Resolve(tc.profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			md, err := discoverAuthServer(context.Background(), failingDiscoverer{},
+				prof.Endpoints.APIBase, prof.Endpoints.AuthBase, !prof.IsProduction())
+			if err != nil {
+				t.Fatalf("discoverAuthServer: %v", err)
+			}
+			if md.Issuer != tc.issuer {
+				t.Errorf("fallback issuer = %q, want %s", md.Issuer, tc.issuer)
+			}
+			if md.TokenEndpoint != tc.issuer+"/connect/oauth/token" {
+				t.Errorf("fallback token endpoint = %q", md.TokenEndpoint)
+			}
+		})
 	}
 }
 
