@@ -94,7 +94,11 @@ func fetchOpenAPI(parent context.Context, app *appCtx, httpc *http.Client) ([]by
 		return nil, "", output.New(output.ExitGeneric, "could not build the spec request: "+err.Error(), "")
 	}
 	req.Header.Set("Accept", "application/json")
-	if h := app.credential().AuthorizationHeader(); h != "" {
+	cred, err := app.credential(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	if h := cred.AuthorizationHeader(); h != "" {
 		req.Header.Set("Authorization", h)
 	}
 	resp, err := httpc.Do(req)

@@ -46,7 +46,11 @@ func newSandboxSeedCmd() *cobra.Command {
 			}
 			ctx, cancel := baseContext()
 			defer cancel()
-			resp, err := app.apiClient().Do(ctx, "POST", client.PathSandboxSeed, []byte(`{}`), true)
+			cl, err := app.apiClient(ctx)
+			if err != nil {
+				return err
+			}
+			resp, err := cl.Do(ctx, "POST", client.PathSandboxSeed, []byte(`{}`), true)
 			if err != nil {
 				return err
 			}
@@ -77,7 +81,11 @@ func newSandboxResetCmd() *cobra.Command {
 			}
 			ctx, cancel := baseContext()
 			defer cancel()
-			resp, err := app.apiClient().Do(ctx, "POST", client.PathSandboxReset, []byte(`{}`), true)
+			cl, err := app.apiClient(ctx)
+			if err != nil {
+				return err
+			}
+			resp, err := cl.Do(ctx, "POST", client.PathSandboxReset, []byte(`{}`), true)
 			if err != nil {
 				return err
 			}

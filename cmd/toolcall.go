@@ -50,17 +50,12 @@ type mcpToolResult struct {
 //     required and forwarded as the bearer; scopeHint names the scope for the
 //     no-credential remediation.
 func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any, requireConsumer bool, scopeHint string) (json.RawMessage, error) {
-	authHeader := ""
+	remote := mcpbridge.NewHTTPRemote(a.mcpEndpoint(), "", a.httpClient())
 	if requireConsumer {
-		cred := a.credential()
-		if cred == nil || cred.AuthorizationHeader() == "" {
-			return nil, output.New(output.ExitAuth,
-				"this command requires a consumer credential but none is stored",
-				"Run `givmo login` to authenticate with the "+scopeHint+" scope, or set GIVMO_API_KEY for non-interactive use.")
-		}
-		authHeader = cred.AuthorizationHeader()
+		// The token source gives the request its bearer, renewed when it is about
+		// to expire and once more after a 401.
+		remote.Authorizer = mcpAuthorizer{app: a, required: true, scopeHint: scopeHint}
 	}
-	remote := mcpbridge.NewHTTPRemote(a.mcpEndpoint(), authHeader, a.httpClient())
 	if a.toolCallTimeout > 0 {
 		remote.CallTimeout = a.toolCallTimeout
 	}
@@ -70,6 +65,10 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 	}
 	raw, rerr := remote.Forward(ctx, "tools/call", json.RawMessage(params))
 	if rerr != nil {
+		if rerr.Err != nil {
+			// No credential could authorize the call, so it was not sent.
+			return nil, rerr.Err
+		}
 		msg := "remote MCP call failed: " + strings.TrimSpace(rerr.Message)
 		switch rerr.Kind {
 		case mcpbridge.KindOutcomeUnknown:

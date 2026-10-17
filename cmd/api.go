@@ -67,7 +67,11 @@ Examples:
 			defer cancel()
 
 			// requireAuth=true: the escape hatch is the authenticated surface.
-			resp, err := app.apiClient().Do(ctx, method, path, body, true)
+			cl, err := app.apiClient(ctx)
+			if err != nil {
+				return err
+			}
+			resp, err := cl.Do(ctx, method, path, body, true)
 			if err != nil {
 				return err
 			}

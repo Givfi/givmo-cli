@@ -26,6 +26,16 @@ const (
 	AuxiliaryTimeout = 30 * time.Second
 )
 
+// Authorizer supplies the Authorization header of each request to the remote
+// MCP. Rejected is asked once when the remote answers HTTP 401 to a request that
+// carried header: it returns the header to repeat the request with, or "" to give
+// up. The remote resolves the bearer before it runs anything, so a request it
+// refused with a 401 never ran, and repeating it is safe.
+type Authorizer interface {
+	Authorization(ctx context.Context) (string, error)
+	Rejected(ctx context.Context, header string) (string, error)
+}
+
 // HTTPRemote is a RemoteInvoker that forwards JSON-RPC calls to the remote
 // Givmo MCP endpoint (Streamable HTTP, stateless) at <endpoint>, injecting the
 // stored bearer as Authorization. The remote is stateless per request, matching
@@ -38,6 +48,10 @@ type HTTPRemote struct {
 	// CallTimeout bounds one tools/call request; AuxTimeout every other request.
 	CallTimeout time.Duration
 	AuxTimeout  time.Duration
+	// Authorizer, when set, gives each request its Authorization header in place
+	// of the fixed one, so a long-lived bridge carries a current bearer, and is
+	// asked once for another after a 401.
+	Authorizer Authorizer
 }
 
 // NewHTTPRemote builds an HTTP remote. endpoint is the full MCP URL (e.g.
@@ -88,41 +102,47 @@ func (r *HTTPRemote) Forward(ctx context.Context, method string, params json.Raw
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	// sent turns true once the whole request has been written to the connection.
-	// From then on the server may be running the call, so a failure is no longer
-	// "unreachable": for a tools/call its outcome is unknown.
-	var sent atomic.Bool
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			if info.Err == nil {
-				sent.Store(true)
-			}
-		},
-	})
+	header := r.authHdr
+	if r.Authorizer != nil {
+		h, err := r.Authorizer.Authorization(ctx)
+		if err != nil {
+			return nil, authorizationFailed(err)
+		}
+		header = h
+	}
 	start := time.Now()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(buf))
-	if err != nil {
-		return nil, &rpcError{Code: codeInternalError, Message: err.Error()}
+	at, rerr := r.post(ctx, buf, header)
+	if rerr != nil {
+		return nil, rerr
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	// Streamable HTTP MCP accepts both JSON and SSE; we consume JSON.
-	httpReq.Header.Set("Accept", "application/json, text/event-stream")
-	if r.authHdr != "" {
-		httpReq.Header.Set("Authorization", r.authHdr)
-	}
-	resp, err := r.client.Do(httpReq)
-	if err != nil {
-		switch {
-		case !sent.Load():
-			return nil, &rpcError{Code: codeInternalError, Kind: KindUnreachable,
-				Message: "remote MCP unreachable: " + err.Error() +
-					" (the /mcp endpoint may not be reachable or enabled in this environment)"}
-		case toolCall:
-			return nil, toolCallUnanswered(lostAnswerCause(err, start))
-		default:
-			return nil, &rpcError{Code: codeInternalError, Message: "remote MCP did not answer " + method + ": " + err.Error()}
+	// A 401 to a bearer: renew it and repeat the request once. The remote refused
+	// it before running anything, so a tools/call cannot run twice.
+	if at.err == nil && at.resp.StatusCode == http.StatusUnauthorized && r.Authorizer != nil && header != "" {
+		next, err := r.Authorizer.Rejected(ctx, header)
+		if err != nil {
+			at.resp.Body.Close()
+			return nil, authorizationFailed(err)
+		}
+		if next != "" && next != header {
+			at.resp.Body.Close()
+			if at, rerr = r.post(ctx, buf, next); rerr != nil {
+				return nil, rerr
+			}
 		}
 	}
+	if at.err != nil {
+		switch {
+		case !at.sent:
+			return nil, &rpcError{Code: codeInternalError, Kind: KindUnreachable,
+				Message: "remote MCP unreachable: " + at.err.Error() +
+					" (the /mcp endpoint may not be reachable or enabled in this environment)"}
+		case toolCall:
+			return nil, toolCallUnanswered(lostAnswerCause(at.err, start))
+		default:
+			return nil, &rpcError{Code: codeInternalError, Message: "remote MCP did not answer " + method + ": " + at.err.Error()}
+		}
+	}
+	resp := at.resp
 	defer resp.Body.Close()
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 
@@ -185,6 +205,46 @@ func (r *HTTPRemote) Forward(ctx context.Context, method string, params json.Raw
 		return nil, nonRPC()
 	}
 	return rpc.Result, nil
+}
+
+// attempt is one POST of a JSON-RPC request: its response or transport error,
+// and whether the whole request was written to the connection first. From then
+// on the server may be running the call, so a failure is no longer
+// "unreachable": for a tools/call its outcome is unknown.
+type attempt struct {
+	resp *http.Response
+	sent bool
+	err  error
+}
+
+// post sends body to the remote with the given Authorization header.
+func (r *HTTPRemote) post(ctx context.Context, body []byte, header string) (attempt, *rpcError) {
+	var sent atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				sent.Store(true)
+			}
+		},
+	})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return attempt{}, &rpcError{Code: codeInternalError, Message: err.Error()}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	// Streamable HTTP MCP accepts both JSON and SSE; we consume JSON.
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	if header != "" {
+		httpReq.Header.Set("Authorization", header)
+	}
+	resp, err := r.client.Do(httpReq)
+	return attempt{resp: resp, sent: sent.Load(), err: err}, nil
+}
+
+// authorizationFailed is the error for a request the Authorizer could not
+// authorize, so it was not sent. Err keeps the Authorizer's own error.
+func authorizationFailed(err error) *rpcError {
+	return &rpcError{Code: codeInvalidRequest, Message: err.Error(), Err: err}
 }
 
 // compactErrorBody is the transport's compact error envelope, which the remote

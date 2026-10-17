@@ -59,7 +59,11 @@ Known events:
 			ctx, cancel := baseContext()
 			defer cancel()
 
-			resp, err := app.apiClient().Do(ctx, "POST", client.PathSandboxEvents, body, true)
+			cl, err := app.apiClient(ctx)
+			if err != nil {
+				return err
+			}
+			resp, err := cl.Do(ctx, "POST", client.PathSandboxEvents, body, true)
 			if err != nil {
 				return err
 			}
