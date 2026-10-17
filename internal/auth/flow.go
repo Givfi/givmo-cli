@@ -9,8 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -292,6 +294,136 @@ func ExchangeCode(ctx context.Context, client *http.Client, p ExchangeParams) (*
 	}
 	if resp.StatusCode != http.StatusOK || tr.AccessToken == "" {
 		return nil, fmt.Errorf("token endpoint returned HTTP %d with no access_token", resp.StatusCode)
+	}
+	return &tr, nil
+}
+
+// The client authentication methods the CLI uses at the token and revocation
+// endpoints (their RFC 8414 names).
+const (
+	// AuthMethodNone is a public client's: no secret, the client_id in the form.
+	AuthMethodNone = "none"
+	// AuthMethodClientSecretBasic is a registered confidential client's: its id
+	// and secret in an HTTP Basic header (RFC 6749 section 2.3.1).
+	AuthMethodClientSecretBasic = "client_secret_basic"
+)
+
+// TokenError is an error answer from the token or revocation endpoint: the OAuth
+// error code and description it sent (RFC 6749 section 5.2), or only an HTTP
+// status when the body named none.
+type TokenError struct {
+	Status      int
+	Code        string
+	Description string
+	// RetryAfter is the answer's Retry-After header, verbatim.
+	RetryAfter string
+}
+
+func (e *TokenError) Error() string {
+	switch {
+	case e.Code != "" && e.Description != "":
+		return e.Code + ": " + e.Description
+	case e.Code != "":
+		return e.Code
+	default:
+		return fmt.Sprintf("HTTP %d", e.Status)
+	}
+}
+
+// TransportError is a request to the token or revocation endpoint that got no
+// answer. Sent says whether the whole request was written to the connection
+// first, so the server may have acted on it.
+type TransportError struct {
+	Sent bool
+	Err  error
+}
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// postForm posts form to endpoint, authenticating the client by authMethod:
+// AuthMethodClientSecretBasic sends the Basic header, AuthMethodNone nothing
+// (the form carries the client_id). It returns the answer's status, header and
+// body (at most 1 MiB), or a *TransportError when none arrived.
+func postForm(ctx context.Context, client *http.Client, endpoint string, form url.Values, authMethod, clientID, secret string) (int, http.Header, []byte, error) {
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+	var sent atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				sent.Store(true)
+			}
+		},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return 0, nil, nil, &TransportError{Err: err}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if authMethod == AuthMethodClientSecretBasic {
+		req.Header.Set("Authorization", clientSecretBasicHeader(clientID, secret))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, nil, &TransportError{Sent: sent.Load(), Err: err}
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, nil, nil, &TransportError{Sent: true, Err: err}
+	}
+	return resp.StatusCode, resp.Header, body, nil
+}
+
+// tokenError decodes an error answer's OAuth error fields.
+func tokenError(status int, header http.Header, body []byte) *TokenError {
+	e := &TokenError{Status: status, RetryAfter: strings.TrimSpace(header.Get("Retry-After"))}
+	var fields struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if json.Unmarshal(body, &fields) == nil {
+		e.Code, e.Description = fields.Error, fields.ErrorDescription
+	}
+	return e
+}
+
+// RefreshParams captures one renewal of a sign-in (RFC 6749 section 6).
+type RefreshParams struct {
+	TokenEndpoint string
+	ClientID      string
+	// ClientSecret is a registered client's secret, sent only with
+	// AuthMethodClientSecretBasic.
+	ClientSecret string
+	AuthMethod   string
+	RefreshToken string
+}
+
+// Refresh presents the refresh token at the token endpoint and returns the new
+// tokens. The authorization server rotates the refresh token on every renewal
+// and ends the whole sign-in when one is presented twice, so a caller must never
+// present the same one concurrently (see TokenSource). An error answer returns a
+// *TokenError, no answer a *TransportError.
+func Refresh(ctx context.Context, client *http.Client, p RefreshParams) (*TokenResponse, error) {
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", p.RefreshToken)
+	form.Set("client_id", p.ClientID)
+	status, header, body, err := postForm(ctx, client, p.TokenEndpoint, form, p.AuthMethod, p.ClientID, p.ClientSecret)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, tokenError(status, header, body)
+	}
+	var tr TokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil || tr.AccessToken == "" {
+		// The server answered, and may have rotated the refresh token, but its new
+		// tokens did not arrive: for the caller that is a lost answer.
+		return nil, &TransportError{Sent: true, Err: errors.New("the token endpoint's answer carried no access token")}
 	}
 	return &tr, nil
 }

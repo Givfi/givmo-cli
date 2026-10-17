@@ -28,6 +28,26 @@ type Credential struct {
 	Subject string `json:"subject,omitempty"`
 	// ExpiresAt is when the access token expires (zero = unknown/never).
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
+
+	// The fields below are what renewing and ending an OAuth sign-in need. A
+	// credential saved by an earlier givmo has none of them, so it is used until
+	// it expires and never renewed.
+
+	// ClientID is the OAuth client the sign-in was granted to: the URL of a
+	// client metadata document, or a registered client's id.
+	ClientID string `json:"client_id,omitempty"`
+	// Issuer is the authorization server's issuer identifier.
+	Issuer string `json:"issuer,omitempty"`
+	// TokenEndpoint is where the refresh token is presented.
+	TokenEndpoint string `json:"token_endpoint,omitempty"`
+	// RevocationEndpoint is where logout ends the sign-in (RFC 7009).
+	RevocationEndpoint string `json:"revocation_endpoint,omitempty"`
+	// AuthMethod is how the client authenticates at those endpoints:
+	// AuthMethodNone or AuthMethodClientSecretBasic.
+	AuthMethod string `json:"auth_method,omitempty"`
+	// GrantedAt is when the person consented, from which the authorization
+	// server counts the sign-in's 90-day ceiling. Renewals carry it unchanged.
+	GrantedAt time.Time `json:"granted_at,omitempty"`
 }
 
 const (
@@ -44,6 +64,20 @@ func (c *Credential) Expired() bool {
 		return false
 	}
 	return time.Now().Add(30 * time.Second).After(c.ExpiresAt)
+}
+
+// Renewable reports whether the credential carries what a renewal needs: an
+// OAuth sign-in with its refresh token, its client, a token endpoint and a known
+// authentication method.
+func (c *Credential) Renewable() bool {
+	return c != nil && c.Type == CredTypeOAuth && c.RefreshToken != "" && c.ClientID != "" &&
+		c.TokenEndpoint != "" && (c.AuthMethod == AuthMethodNone || c.AuthMethod == AuthMethodClientSecretBasic)
+}
+
+// expiresWithin reports whether the access token expires within d. An unknown
+// expiry never does.
+func (c *Credential) expiresWithin(d time.Duration) bool {
+	return !c.ExpiresAt.IsZero() && time.Now().Add(d).After(c.ExpiresAt)
 }
 
 // AuthorizationHeader returns the value for the HTTP Authorization header, or
