@@ -168,7 +168,9 @@ func renewalError(err error) error {
 	case errors.As(err, &tr):
 		return output.New(output.ExitNetwork, "Givmo did not answer the sign-in renewal: "+tr.Error(), lostRenewalRemediation)
 	}
-	return output.New(output.ExitGeneric, "could not read the stored sign-in: "+err.Error(),
+	// A stored credential that cannot be read, or a registered client's renewal
+	// with no secret to hand.
+	return output.New(output.ExitGeneric, "the stored sign-in could not be used: "+err.Error(),
 		"Run `givmo logout`, then `givmo login`.")
 }
 
