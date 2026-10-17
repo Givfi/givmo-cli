@@ -22,8 +22,8 @@ However it is connected, an agent can never:
 - handle a card number, bank details or any other payment credential;
 - accept terms or agreements on anyone's behalf;
 - sign in as the person or use their password. It gets its own limited access,
-  which lapses if it goes unused and which the person can end in the Givmo app
-  for iPhone;
+  which lapses if it goes unused and which the person can end in Connected Apps
+  (below);
 - give itself more authority: widen what it is allowed to do, connect another
   app, or change the limits, payment details or settings that protect anyone's
   money.
@@ -37,9 +37,10 @@ A person connects an agent on Givmo's own page, never inside the agent. They
 sign in to Givmo there; the page names the app that is asking and lists the
 permissions it is asking for; and they approve or decline.
 
-In the Givmo app for iPhone, **Connected Apps** lists the apps linked to a
-person's account, and **Revoke access** ends an app's access on Givmo's side at
-once.
+**Connected Apps** lists the apps linked to a person's account: in the Givmo
+app for iPhone and for Android, and on the web at
+`https://consent.givmo.io/connected-apps`. **Revoke access** ends an app's
+access on Givmo's side at once.
 
 With this repository's `givmo` CLI, `givmo logout` deletes the sign-in on the
 computer and asks Givmo to end it on Givmo's side; where Givmo can't end it from
