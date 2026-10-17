@@ -258,6 +258,10 @@ func toolErrorFromResult(tr mcpToolResult, name string) *output.Error {
 	return toolErrorFromText(text, name, r.Refusal)
 }
 
+// paymentProcessingRemediation is payment_processing's own remediation: the
+// donation's receipt, not another call, says whether its payment went through.
+const paymentProcessingRemediation = "Don't repeat the call now, with this idempotency key or a new one: a payment for this donation may still be going through. Wait for the receipt in the email on the person's Givmo account (it can take up to two days) before trying again."
+
 // toolErrorFromText maps an isError tool result (a raised dispatch error or a refused
 // write) to the CLI envelope, keying on the STABLE error code the backend sends — the
 // structured refusal code when the result carries one, else the code it prefixes onto
@@ -293,6 +297,13 @@ func toolErrorFromText(text, name, refusal string) *output.Error {
 			return output.New(output.ExitAuth,
 				"the MCP tool '"+name+"' found no signed-in donor: "+text,
 				"The Givmo account behind this credential may no longer exist. Run `givmo login` with an active account, then retry.")
+		case code == "payment_processing":
+			// The key replayed a donation whose payment has no final answer yet.
+			// Its outcome is unknown, and changing the request would start a second
+			// donation while the first may still complete.
+			return output.New(output.ExitOutcomeUnknown,
+				"the MCP tool '"+name+"' did not start a new checkout: "+text,
+				paymentProcessingRemediation)
 		case code == "invalid_arguments" || donationRejectionCodes[code]:
 			return validationError()
 		}

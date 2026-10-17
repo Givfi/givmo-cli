@@ -721,3 +721,45 @@ func TestCallTool_DonorUnavailableIsAnAuthFailure(t *testing.T) {
 		t.Errorf("no change to the request fixes a missing account: %q", oe.Remediation)
 	}
 }
+
+// TestDonationIntentsCreate_PaymentProcessingWaitsForTheReceipt: the money tool's
+// refusal for a key that replays a donation whose payment is in flight, exactly as
+// the server sends it (its code only in structuredContent, no disposition fields).
+// Its outcome is unknown, so it exits 8, and its remediation says to wait for the
+// receipt: the generic text's "change the request" invites a retry under a new key,
+// a second donation while the first may still complete, and the idempotency-key
+// retry the create command offers for a lost answer would only replay the refusal.
+func TestDonationIntentsCreate_PaymentProcessingWaitsForTheReceipt(t *testing.T) {
+	const text = "A payment for this donation may still be going through. Wait for a receipt in the email on your Givmo account before trying again. It can take up to two days."
+	srv := rpcServer(t, refusalResult(text, map[string]any{"source": "givmo_donation_intent", "refusal": "payment_processing"}), nil)
+	defer srv.Close()
+	t.Setenv("GIVMO_HOME", t.TempDir())
+	t.Setenv("GIVMO_TOKEN_BACKEND", "file")
+	t.Setenv("GIVMO_PROFILE", "sandbox")
+	t.Setenv("GIVMO_API_BASE", srv.URL)
+	t.Setenv("GIVMO_API_KEY", "tok")
+
+	cmd := newDonationIntentsCreateCmd()
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--charity", "ch_1", "--amount", "2500", "--idempotency-key", "my-key-1"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected the refusal to fail the create")
+	}
+	oe := output.AsError(err)
+	if oe.Code != output.ExitOutcomeUnknown {
+		t.Errorf("exit %d (%s), want ExitOutcomeUnknown", oe.Code, output.CodeName(oe.Code))
+	}
+	if !strings.Contains(oe.Message, text) {
+		t.Errorf("message must carry the server's text verbatim: %q", oe.Message)
+	}
+	if !strings.Contains(oe.Remediation, "Wait for the receipt") || !strings.Contains(oe.Remediation, "Don't repeat the call") {
+		t.Errorf("remediation must say to wait for the receipt and not repeat the call: %q", oe.Remediation)
+	}
+	for _, wrong := range []string{"--idempotency-key", "does not recognize", "Adjust the request"} {
+		if strings.Contains(oe.Remediation, wrong) {
+			t.Errorf("remediation must not say %q: %q", wrong, oe.Remediation)
+		}
+	}
+}

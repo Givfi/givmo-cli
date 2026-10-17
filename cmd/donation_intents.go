@@ -192,10 +192,12 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 // unknown. No consumer tool reads donation intents back, so "read before
 // retrying" cannot be followed here; the safe next step is a retry with the SAME
 // key, which returns the same donation intent instead of creating a second one.
-// Every other error passes through unchanged.
+// A payment_processing refusal keeps its own remediation: its payment may still be
+// going through, so the next step is to wait for the receipt, not to retry. Every
+// other error passes through unchanged.
 func withIdempotencyRetry(err error, idemKey string) error {
 	oe := output.AsError(err)
-	if oe.Code != output.ExitOutcomeUnknown {
+	if oe.Code != output.ExitOutcomeUnknown || oe.Remediation == paymentProcessingRemediation {
 		return err
 	}
 	named := *oe
