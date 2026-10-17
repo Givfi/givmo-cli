@@ -21,8 +21,10 @@ revocation of its refresh token), then remove the stored consumer token, API
 key, and OAuth client secret from the OS keychain (or the separate 0600 file
 fallbacks). The credentials on this computer are always removed. Where Givmo
 can't end the sign-in from the CLI yet, or can't be reached, logout says so;
-Revoke access in Connected Apps ends it there. Logging out of a profile with no
-stored auth material is a no-op (idempotent).`,
+Revoke access in Connected Apps ends it there. With --json, "revoked": true
+means Givmo accepted the request to end the sign-in; when it is false,
+"revoke_error" says why. Logging out of a profile with no stored auth material
+is a no-op (idempotent).`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			app, err := resolveAppCtx()
 			if err != nil {
@@ -40,8 +42,9 @@ const revokeTimeout = 15 * time.Second
 
 // givmoSide is what logout learned about ending the sign-in on Givmo's side.
 type givmoSide struct {
-	// asked says there was an OAuth sign-in to end; revoked, that Givmo ended it;
-	// reason, why not.
+	// asked says there was an OAuth sign-in to end; revoked, that Givmo accepted
+	// the request to end it (RFC 7009 answers 200 for a token it no longer knows
+	// too); reason, why not.
 	asked   bool
 	revoked bool
 	reason  string
@@ -72,7 +75,7 @@ func runLogout(ctx context.Context, app *appCtx) error {
 		switch {
 		case !side.asked:
 		case side.revoked:
-			fmt.Fprintln(w, "Ended the sign-in on Givmo's side too.")
+			fmt.Fprintln(w, "Asked Givmo to end the sign-in; it accepted.")
 		default:
 			fmt.Fprintf(w, "The sign-in is not ended on Givmo's side: %s. To end it there, use Revoke access in Connected Apps.\n", side.reason)
 		}

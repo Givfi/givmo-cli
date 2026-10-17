@@ -219,8 +219,8 @@ The CLI stays signed in by renewing its access token, one renewal at a time
 across every `givmo` process on the computer, for up to 90 days from your
 consent; 14 days without use ends it sooner. In the last week, commands print
 the date it ends. Where an environment doesn't accept the CLI's sign-in yet,
-`givmo login` says so before opening a browser and exits `6`. The `sandbox`
-profile has no consent page, so a browser sign-in can't complete there.
+`givmo login` says so before opening a browser and exits `6`. On the `sandbox`
+profile, use `GIVMO_API_KEY` if a browser sign-in is not offered.
 
 To sign in as your own registered confidential client instead, set
 `GIVMO_CLIENT_ID` and `GIVMO_CLIENT_SECRET`. The CLI reads `GIVMO_CLIENT_SECRET`

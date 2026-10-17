@@ -117,7 +117,7 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 				}
 				want := fmt.Sprintf("Cleared credentials for profile %q.\n", config.ProfileSandbox)
 				if tc.wantRevoked {
-					want += "Ended the sign-in on Givmo's side too.\n"
+					want += "Asked Givmo to end the sign-in; it accepted.\n"
 				} else {
 					want += "The sign-in is not ended on Givmo's side: " + tc.wantReason
 				}

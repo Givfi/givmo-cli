@@ -64,7 +64,7 @@ Tokens are stored in the OS keychain when available, else a 0600 file under
 			if c.Flags().Changed("port") && (loginPort < 1 || loginPort > 65535) {
 				return output.New(output.ExitValidation,
 					fmt.Sprintf("login callback port %d is outside valid range 1-65535", loginPort),
-					"Pass `--port <N>` with a value from 1 through 65535 whose callback redirect URI is registered for your Givmo OAuth client.")
+					"Pass `--port <N>` with a value from 1 through 65535.")
 			}
 			app, err := resolveAppCtx()
 			if err != nil {
@@ -162,7 +162,7 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	if err != nil {
 		remediation := "Ensure localhost binding is permitted (no restrictive firewall on 127.0.0.1)."
 		if loginPort != 0 {
-			remediation = fmt.Sprintf("Free port %d if another process is using it, or pass `--port <N>` where http://127.0.0.1:<N>/callback is registered for your Givmo OAuth client.", loginPort)
+			remediation = fmt.Sprintf("Free port %d if another process is using it, or pass another `--port <N>` (for a registered GIVMO_CLIENT_ID, one whose http://127.0.0.1:<N>/callback is registered).", loginPort)
 		}
 		return output.New(output.ExitGeneric, "could not start loopback listener: "+err.Error(), remediation)
 	}
