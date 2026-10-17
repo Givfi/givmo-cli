@@ -512,6 +512,40 @@ func Refresh(ctx context.Context, client *http.Client, p RefreshParams) (*TokenR
 	return &tr, nil
 }
 
+// RevokeParams captures one revocation request (RFC 7009).
+type RevokeParams struct {
+	Endpoint string
+	ClientID string
+	// ClientSecret is a registered client's secret, sent only with
+	// AuthMethodClientSecretBasic.
+	ClientSecret string
+	AuthMethod   string
+	Token        string
+	// TokenTypeHint is "refresh_token" or "access_token".
+	TokenTypeHint string
+}
+
+// Revoke asks the authorization server to revoke a token (RFC 7009). Revoking a
+// sign-in's refresh token ends the whole sign-in, its access tokens with it. The
+// server answers 200 alike for a token it revoked and one it does not know; an
+// error answer returns a *TokenError, no answer a *TransportError.
+func Revoke(ctx context.Context, client *http.Client, p RevokeParams) error {
+	form := url.Values{}
+	form.Set("token", p.Token)
+	if p.TokenTypeHint != "" {
+		form.Set("token_type_hint", p.TokenTypeHint)
+	}
+	form.Set("client_id", p.ClientID)
+	status, header, body, err := postForm(ctx, client, p.Endpoint, form, p.AuthMethod, p.ClientID, p.ClientSecret)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return tokenError(status, header, body)
+	}
+	return nil
+}
+
 // CredentialFromToken converts a TokenResponse into a stored Credential.
 func CredentialFromToken(profile string, tr *TokenResponse) *Credential {
 	c := &Credential{
