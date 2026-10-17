@@ -41,6 +41,10 @@ In the Givmo app for iPhone, **Connected Apps** lists the apps linked to a
 person's account, and **Revoke access** ends an app's access on Givmo's side at
 once.
 
+With this repository's `givmo` CLI, `givmo logout` deletes the sign-in on the
+computer and asks Givmo to end it on Givmo's side; where Givmo can't end it from
+the CLI yet, the CLI says so, and **Revoke access** in Connected Apps ends it.
+
 ## Money
 
 No agent connected to a person's Givmo account can move money. It cannot pay,
