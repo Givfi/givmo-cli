@@ -38,9 +38,8 @@ sign in to Givmo there; the page names the app that is asking and lists the
 permissions it is asking for; and they approve or decline.
 
 **Connected Apps** lists the apps linked to a person's account: in the Givmo
-app for iPhone and for Android, and on the web at
-`https://consent.givmo.io/connected-apps`. **Revoke access** ends an app's
-access on Givmo's side at once.
+app for iPhone and for Android, and on Givmo's Connected Apps page on the web.
+**Revoke access** ends an app's access on Givmo's side at once.
 
 With this repository's `givmo` CLI, `givmo logout` deletes the sign-in on the
 computer and asks Givmo to end it on Givmo's side; where Givmo can't end it from

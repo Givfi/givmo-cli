@@ -79,7 +79,7 @@ agent operator.
 
 ```
 agent: givmo --json donation-intents create --charity ch_abc123 --amount 2500
-   -> {"donation_intent_id":"dn_…","status":"requires_payment","charity_id":"ch_abc123",
+   -> {"donation_intent_id":"dn_…","status":"requires_payment_method","charity_id":"ch_abc123",
        "amount_cents":2500,"currency":"usd",
        "checkout_url":"https://donate.givmo.io/give#gco_XXXX","expires_at":"…"}
 agent: present checkout_url to the human (or add --open to launch a browser)
