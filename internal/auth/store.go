@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,14 +92,7 @@ func (s *Store) SaveClientSecret(profile, secret string) error {
 	if s.useKeychain {
 		return s.keychainSetService(clientSecretKeychainService, profile, []byte(secret))
 	}
-	p := s.clientSecretPath(profile)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(p, []byte(secret), 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(p, 0o600)
+	return writeFileAtomic(s.clientSecretPath(profile), []byte(secret))
 }
 
 // Load returns the credential for a profile, or ErrNoCredential.
@@ -139,6 +133,17 @@ func (s *Store) LoadClientSecret(profile string) (string, error) {
 	return string(data), nil
 }
 
+// DeleteCredential clears the profile's stored credential and leaves its OAuth
+// client secret in place: a sign-in that has ended can be replaced by a new
+// login with the same registered client. Deleting a missing credential is not an
+// error.
+func (s *Store) DeleteCredential(profile string) error {
+	if s.useKeychain {
+		return s.keychainDeleteService(keychainService, profile)
+	}
+	return s.fileDelete(profile)
+}
+
 // Delete clears all stored auth material for a profile. Deleting missing auth
 // material is not an error (idempotent logout).
 func (s *Store) Delete(profile string) error {
@@ -175,15 +180,36 @@ func sanitizedProfile(profile string) string {
 }
 
 func (s *Store) fileSet(profile string, data []byte) error {
-	p := s.credPath(profile)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	return writeFileAtomic(s.credPath(profile), data)
+}
+
+// writeFileAtomic writes data to path through a temporary file in the same
+// directory and a rename, so a process reading the file while another renews the
+// sign-in sees the old content or the new, never a half-written file. The file is
+// 0600: owner read/write only, never world-readable.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// 0600: owner read/write only. Never world-readable.
-	if err := os.WriteFile(p, data, 0o600); err != nil {
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	if err != nil {
 		return err
 	}
-	return nil
+	tmp := f.Name()
+	defer os.Remove(tmp) // a no-op once the rename has moved it
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func (s *Store) fileGet(profile string) ([]byte, error) {
@@ -216,18 +242,45 @@ func (s *Store) keychainSet(profile string, data []byte) error {
 	return s.keychainSetService(keychainService, profile, data)
 }
 
+// keychainLineMax bounds the one line the keychain write sends to `security -i`.
+// security reads each line of its input into a 4096-byte buffer and runs
+// whatever does not fit as a second command: the line's head then stores a
+// truncated item, and its tail is echoed in an "unknown command" error. Measured
+// on macOS: a 4085-character line is read whole, a 4115-character one is split.
+const keychainLineMax = 4000
+
 func (s *Store) keychainSetService(service, profile string, data []byte) error {
-	// -U updates if present; -w takes the secret as the password value.
-	cmd := exec.Command("security", "add-generic-password",
-		"-a", profile,
-		"-s", service,
-		"-w", string(data),
-		"-U",
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("keychain store failed: %v: %s", err, strings.TrimSpace(string(out)))
+	// The value reaches `security` on its standard input, hex-encoded (-X), never
+	// on its command line, where ps would show it to every process of this user.
+	// -U updates the item if present. security's output is never read: on a
+	// failure it can echo part of the line it was given.
+	if !keychainName(service) || !keychainName(profile) {
+		return errors.New("keychain store failed: invalid item name")
+	}
+	line := "add-generic-password -U -a " + profile + " -s " + service + " -X " + hex.EncodeToString(data) + "\n"
+	if len(line) > keychainLineMax {
+		return errors.New("keychain store failed: the item is too large for the keychain")
+	}
+	cmd := exec.Command("security", "-i")
+	cmd.Stdin = strings.NewReader(line)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("keychain store failed (security: %v)", err)
 	}
 	return nil
+}
+
+// keychainName reports whether s is safe to place unquoted on a `security -i`
+// command line: the known profile names and the CLI's service names are.
+func keychainName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) keychainGet(profile string) ([]byte, error) {

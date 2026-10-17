@@ -2,8 +2,13 @@ package auth
 
 import (
 	"bytes"
+	"encoding/hex"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -149,5 +154,119 @@ func TestCredential_AuthorizationHeader(t *testing.T) {
 	var nilc *Credential
 	if got := nilc.AuthorizationHeader(); got != "" {
 		t.Errorf("nil credential header = %q, want empty", got)
+	}
+}
+
+// fakeSecurity is a stand-in for macOS `security`: a shell script, the only
+// program on PATH, that records its arguments and standard input under dir and
+// exits 0, or, with FAKE_SECURITY_FAIL set, echoes its input in an error and
+// exits 1, as the real one does for a line it cannot run. It touches no keychain.
+const fakeSecurity = `#!/bin/sh
+: > "$FAKE_SECURITY_OUT/argv"
+for a in "$@"; do printf '%s\n' "$a" >> "$FAKE_SECURITY_OUT/argv"; done
+: > "$FAKE_SECURITY_OUT/stdin"
+last=""
+while IFS= read -r line || [ -n "$line" ]; do
+  printf '%s\n' "$line" >> "$FAKE_SECURITY_OUT/stdin"
+  last="$line"
+done
+if [ -n "$FAKE_SECURITY_FAIL" ]; then
+  printf 'security: unknown command "%s"\n' "$last" >&2
+  exit 1
+fi
+exit 0
+`
+
+// TestKeychainStore_KeepsTheCredentialOffTheCommandLine drives the keychain
+// backend against fakeSecurity. The credential must reach security on its
+// standard input, hex-encoded, and never in its arguments, which ps shows to
+// every process of the user; a credential too long for security's input buffer
+// must not be sent at all, since security would store a truncated item and echo
+// the rest; and security's own output, which can echo its input, must never
+// reach the error.
+func TestKeychainStore_KeepsTheCredentialOffTheCommandLine(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the keychain backend runs only on macOS")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "security"), []byte(fakeSecurity), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("GIVMO_HOME", t.TempDir())
+	t.Setenv("GIVMO_TOKEN_BACKEND", "")
+
+	const accessToken, refreshToken = "test-access-token-not-real", "test-refresh-token-not-real"
+	cases := []struct {
+		name      string
+		access    string
+		fail      bool
+		wantSent  bool
+		wantError bool
+	}{
+		{name: "a credential is written through standard input", access: accessToken, wantSent: true},
+		{name: "a credential too long for security's buffer is not sent", access: strings.Repeat("a", 3000), wantError: true},
+		{name: "security's echo of its input stays out of the error", access: accessToken, fail: true, wantSent: true, wantError: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := t.TempDir()
+			t.Setenv("FAKE_SECURITY_OUT", out)
+			if tc.fail {
+				t.Setenv("FAKE_SECURITY_FAIL", "1")
+			} else {
+				t.Setenv("FAKE_SECURITY_FAIL", "")
+			}
+			// Only the fake may run: with any other security on PATH, stop before
+			// anything is written.
+			if path, err := exec.LookPath("security"); err != nil || path != filepath.Join(bin, "security") {
+				t.Fatalf("security resolves to %q (%v), not the fake", path, err)
+			}
+			s, err := NewStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Backend() != "keychain" {
+				t.Fatalf("backend = %s, want keychain", s.Backend())
+			}
+			cred := &Credential{Profile: "sandbox", Type: CredTypeOAuth, AccessToken: tc.access, RefreshToken: refreshToken}
+			saveErr := s.Save(cred)
+			if (saveErr != nil) != tc.wantError {
+				t.Fatalf("Save error = %v, want error %v", saveErr, tc.wantError)
+			}
+			argv, argvErr := os.ReadFile(filepath.Join(out, "argv"))
+			if !tc.wantSent {
+				if argvErr == nil {
+					t.Fatalf("security ran with %q; a too-long line must not be sent", argv)
+				}
+				return
+			}
+			if argvErr != nil {
+				t.Fatalf("security did not run: %v", argvErr)
+			}
+			if got := string(argv); got != "-i\n" {
+				t.Errorf("security arguments = %q, want only -i", got)
+			}
+			stdin, err := os.ReadFile(filepath.Join(out, "stdin"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, _ := json.Marshal(cred)
+			wantLine := "add-generic-password -U -a sandbox -s io.givmo.cli -X " + hex.EncodeToString(want) + "\n"
+			if string(stdin) != wantLine {
+				t.Errorf("security standard input = %q, want %q", stdin, wantLine)
+			}
+			for _, secret := range []string{tc.access, refreshToken, hex.EncodeToString([]byte(tc.access))} {
+				if strings.Contains(string(argv), secret) {
+					t.Errorf("security arguments carry a secret: %q", argv)
+				}
+				if saveErr != nil && strings.Contains(saveErr.Error(), secret) {
+					t.Errorf("the error carries a secret: %v", saveErr)
+				}
+			}
+			if saveErr != nil && strings.Contains(saveErr.Error(), hex.EncodeToString(want)[:16]) {
+				t.Errorf("the error carries security's echo of its input: %v", saveErr)
+			}
+		})
 	}
 }
