@@ -6,9 +6,10 @@
 //   - Tokens are stored in the OS keychain when available, else in a 0600 file
 //     under ~/.givmo. They are NEVER written to logs and NEVER included in
 //     --json output.
-//   - The CLI authenticates as a confidential client and also uses PKCE as a
-//     proof-of-possession mechanism. The redirect uses a registered loopback
-//     listener URI.
+//   - The CLI signs in as a public native client named by Givmo's client
+//     metadata document, with no secret, or, with the GIVMO_CLIENT_ID override,
+//     as a registered confidential client. PKCE S256 is always used, and the
+//     redirect is a loopback listener on any port (RFC 8252).
 package auth
 
 import (

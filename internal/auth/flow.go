@@ -16,10 +16,17 @@ import (
 	"time"
 )
 
-// ClientID is the CLI's confidential OAuth client id registered with Givmo
-// Connect. The CLI authenticates with a client secret and also uses PKCE; the
-// Givmo authorization server does not support public clients.
-const ClientID = "givmo-cli"
+// ClientDocumentPath is where each Givmo environment serves givmo-cli's client
+// metadata document, under its authorization server's issuer: on production
+// https://mcp.givmo.io/connect/oauth/clients/givmo-cli. The document's URL is the
+// CLI's client id, a public client with no secret (D-MCP-63).
+const ClientDocumentPath = "/connect/oauth/clients/givmo-cli"
+
+// ClientDocumentURL is Givmo's client document for the authorization server whose
+// issuer identifier is issuer.
+func ClientDocumentURL(issuer string) string {
+	return strings.TrimRight(issuer, "/") + ClientDocumentPath
+}
 
 // ProtectedResourceMetadata is the RFC 9728 document published by the MCP host
 // telling clients which authorization server(s) protect the resource.
@@ -31,11 +38,34 @@ type ProtectedResourceMetadata struct {
 
 // AuthServerMetadata is the RFC 8414 authorization-server metadata document.
 type AuthServerMetadata struct {
-	Issuer                        string   `json:"issuer"`
-	AuthorizationEndpoint         string   `json:"authorization_endpoint"`
-	TokenEndpoint                 string   `json:"token_endpoint"`
-	ScopesSupported               []string `json:"scopes_supported,omitempty"`
-	CodeChallengeMethodsSupported []string `json:"code_challenge_methods_supported,omitempty"`
+	Issuer                            string   `json:"issuer"`
+	AuthorizationEndpoint             string   `json:"authorization_endpoint"`
+	TokenEndpoint                     string   `json:"token_endpoint"`
+	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
+	ScopesSupported                   []string `json:"scopes_supported,omitempty"`
+	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported,omitempty"`
+	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
+	// ClientIDMetadataDocumentSupported says the server takes a client metadata
+	// document's URL as a client id.
+	ClientIDMetadataDocumentSupported bool `json:"client_id_metadata_document_supported,omitempty"`
+	// AuthorizationResponseIssParameterSupported says every authorization
+	// response carries iss (RFC 9207).
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
+}
+
+// AcceptsClientDocuments reports whether the server signs in a client named by a
+// client metadata document as a public client: it advertises the documents, and
+// "none" among its token endpoint's authentication methods.
+func (m *AuthServerMetadata) AcceptsClientDocuments() bool {
+	if m == nil || !m.ClientIDMetadataDocumentSupported {
+		return false
+	}
+	for _, method := range m.TokenEndpointAuthMethodsSupported {
+		if method == AuthMethodNone {
+			return true
+		}
+	}
+	return false
 }
 
 // Discoverer fetches OAuth metadata. It is an interface so tests can inject a
@@ -132,6 +162,23 @@ type LoopbackResult struct {
 	Code  string
 	State string
 	Err   string // the OAuth `error` param, if the AS reported one
+	// Iss is the authorization server's issuer the response names (RFC 9207).
+	Iss string
+}
+
+// IssuerError is an authorization response that did not come from the
+// authorization server the login started at: its iss names another, or it
+// carried none where the server advertises iss (RFC 9207).
+type IssuerError struct {
+	Expected string
+	Got      string
+}
+
+func (e *IssuerError) Error() string {
+	if e.Got == "" {
+		return fmt.Sprintf("the sign-in response did not come from %s (it carried no iss)", e.Expected)
+	}
+	return fmt.Sprintf("the sign-in response did not come from %s (its iss was %q)", e.Expected, e.Got)
 }
 
 // LoopbackListener runs a localhost HTTP server to catch the authorization
@@ -143,6 +190,19 @@ type LoopbackListener struct {
 	resultCh    chan LoopbackResult
 	RedirectURI string
 	expectState string
+	// expectIss is the issuer a response's iss must name, when set; issRequired
+	// says the server advertises iss, so a response must carry it.
+	expectIss   string
+	issRequired bool
+}
+
+// ExpectIssuer makes the listener check each response's iss parameter (RFC 9207
+// section 2.4): an iss that is present must equal issuer, by simple string
+// comparison, whether or not the server advertises iss; with required set (it
+// does), a response without one is refused too. Call it before Serve.
+func (l *LoopbackListener) ExpectIssuer(issuer string, required bool) {
+	l.expectIss = issuer
+	l.issRequired = required
 }
 
 // NewLoopbackListener binds 127.0.0.1 on port with the given callback path
@@ -176,13 +236,14 @@ func (l *LoopbackListener) handle(w http.ResponseWriter, r *http.Request) {
 		Code:  q.Get("code"),
 		State: q.Get("state"),
 		Err:   q.Get("error"),
+		Iss:   q.Get("iss"),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if res.Err != "" || res.Code == "" {
+	if res.Code == "" || l.check(res) != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, "<h1>Givmo CLI login failed</h1><p>You can close this window and return to the terminal.</p>")
+		io.WriteString(w, "<h1>givmo-cli: sign-in failed.</h1><p>You can close this tab and return to the terminal.</p>")
 	} else {
-		io.WriteString(w, "<h1>Givmo CLI login complete</h1><p>You can close this window and return to the terminal.</p>")
+		io.WriteString(w, "<h1>givmo-cli: signed in.</h1><p>You can close this tab and return to the terminal.</p>")
 	}
 	// Deliver exactly once.
 	select {
@@ -198,20 +259,36 @@ func (l *LoopbackListener) Serve() {
 }
 
 // Wait blocks until the callback arrives, ctx is done, or timeout elapses. It
-// validates the returned state against the expected value (anti-CSRF).
+// validates the returned state against the expected value (anti-CSRF), and the
+// iss parameter as ExpectIssuer set (an *IssuerError when it fails).
 func (l *LoopbackListener) Wait(ctx context.Context) (LoopbackResult, error) {
 	select {
 	case <-ctx.Done():
 		return LoopbackResult{}, ctx.Err()
 	case res := <-l.resultCh:
-		if res.Err != "" {
-			return res, fmt.Errorf("authorization server returned error %q", res.Err)
-		}
-		if res.State != l.expectState {
-			return LoopbackResult{}, errors.New("state mismatch on callback (possible CSRF); aborting login")
+		if err := l.check(res); err != nil {
+			if res.Err != "" {
+				return res, err
+			}
+			return LoopbackResult{}, err
 		}
 		return res, nil
 	}
+}
+
+// check validates one authorization response: the server's own error first,
+// then state, then iss.
+func (l *LoopbackListener) check(res LoopbackResult) error {
+	if res.Err != "" {
+		return fmt.Errorf("authorization server returned error %q", res.Err)
+	}
+	if res.State != l.expectState {
+		return errors.New("state mismatch on callback (possible CSRF); aborting login")
+	}
+	if l.expectIss != "" && (res.Iss != "" || l.issRequired) && res.Iss != l.expectIss {
+		return &IssuerError{Expected: l.expectIss, Got: res.Iss}
+	}
+	return nil
 }
 
 // Close shuts down the loopback server.
@@ -233,11 +310,16 @@ type TokenResponse struct {
 type ExchangeParams struct {
 	TokenEndpoint string
 	ClientID      string
-	ClientSecret  string
-	Code          string
-	RedirectURI   string
-	CodeVerifier  string
-	Resource      string
+	// ClientSecret is a registered client's secret, sent only with
+	// AuthMethodClientSecretBasic.
+	ClientSecret string
+	// AuthMethod is how the client authenticates: AuthMethodNone (a public
+	// client, its client_id in the form) or AuthMethodClientSecretBasic.
+	AuthMethod   string
+	Code         string
+	RedirectURI  string
+	CodeVerifier string
+	Resource     string
 }
 
 // clientSecretBasicHeader builds RFC 6749 section 2.3.1 client_secret_basic
@@ -276,7 +358,9 @@ func ExchangeCode(ctx context.Context, client *http.Client, p ExchangeParams) (*
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	if p.ClientSecret != "" {
+	// The method decides, never a secret that happens to be at hand: the server
+	// refuses any secret from a public client.
+	if p.AuthMethod == AuthMethodClientSecretBasic {
 		req.Header.Set("Authorization", clientSecretBasicHeader(p.ClientID, p.ClientSecret))
 	}
 	resp, err := client.Do(req)

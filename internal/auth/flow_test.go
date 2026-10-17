@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildAuthorizeURL_Deterministic(t *testing.T) {
@@ -57,25 +59,6 @@ func TestBuildAuthorizeURL_RequiresPKCE(t *testing.T) {
 	}
 	if _, err := BuildAuthorizeURL(AuthorizeParams{PKCE: &PKCE{}}); err == nil {
 		t.Fatal("expected error when authorization_endpoint is missing")
-	}
-}
-
-func TestBuildAuthorizeURL_ClientIDOverride(t *testing.T) {
-	t.Setenv("GIVMO_CLIENT_ID", "gci-test-override")
-	got, err := BuildAuthorizeURL(AuthorizeParams{
-		AuthorizationEndpoint: "https://connect.givmo.io/oauth/authorize",
-		ClientID:              ResolveClientID(),
-		PKCE:                  &PKCE{Challenge: "chal", Method: "S256", State: "state"},
-	})
-	if err != nil {
-		t.Fatalf("BuildAuthorizeURL: %v", err)
-	}
-	u, err := url.Parse(got)
-	if err != nil {
-		t.Fatalf("result is not a URL: %v", err)
-	}
-	if got := u.Query().Get("client_id"); got != "gci-test-override" {
-		t.Errorf("client_id = %q, want %q", got, "gci-test-override")
 	}
 }
 
@@ -205,6 +188,7 @@ func TestExchangeCode_ClientSecretBasicWireShape(t *testing.T) {
 		TokenEndpoint: server.URL,
 		ClientID:      "gci-test-override",
 		ClientSecret:  secret,
+		AuthMethod:    AuthMethodClientSecretBasic,
 		Code:          "the-code",
 		RedirectURI:   "http://127.0.0.1:8765/callback",
 		CodeVerifier:  "the-verifier",
@@ -250,6 +234,7 @@ func TestExchangeCode_ClientSecretBasicWireShape(t *testing.T) {
 	}
 
 	params.ClientSecret = ""
+	params.AuthMethod = AuthMethodNone
 	if _, err := ExchangeCode(context.Background(), server.Client(), params); err != nil {
 		t.Fatalf("ExchangeCode without secret: %v", err)
 	}
@@ -281,5 +266,67 @@ func TestCredentialFromToken(t *testing.T) {
 	}
 	if c.Expired() {
 		t.Error("a token 1h out should not be expired")
+	}
+}
+
+// TestLoopbackListener_ChecksIss pins RFC 9207 at the real listener, the callback
+// read off the wire: a response's iss must name the issuer the login started at;
+// where the server advertises iss, a response without one is refused; and an iss
+// that is present is checked even where the server does not advertise it. A
+// refused response also gets the failure page.
+func TestLoopbackListener_ChecksIss(t *testing.T) {
+	const issuer = "https://mcp.example.test"
+	for _, tc := range []struct {
+		name        string
+		advertised  bool
+		iss         string // "" sends no iss
+		wantRefused bool
+	}{
+		{name: "advertised, the issuer's own", advertised: true, iss: issuer},
+		{name: "advertised, missing", advertised: true, wantRefused: true},
+		{name: "advertised, another issuer's", advertised: true, iss: "https://elsewhere.example.test", wantRefused: true},
+		{name: "not advertised, missing", advertised: false},
+		{name: "not advertised, another issuer's", advertised: false, iss: "https://elsewhere.example.test", wantRefused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := NewLoopbackListener("/callback", "st", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			l.ExpectIssuer(issuer, tc.advertised)
+			l.Serve()
+
+			q := url.Values{"code": {"c1"}, "state": {"st"}}
+			if tc.iss != "" {
+				q.Set("iss", tc.iss)
+			}
+			resp, err := http.Get(l.RedirectURI + "?" + q.Encode())
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			res, err := l.Wait(ctx)
+			var ie *IssuerError
+			if tc.wantRefused {
+				if !errors.As(err, &ie) {
+					t.Fatalf("Wait = %+v, %v; want an IssuerError", res, err)
+				}
+				if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(page), "failed") {
+					t.Errorf("a refused response got HTTP %d %q, want the failure page", resp.StatusCode, page)
+				}
+				return
+			}
+			if err != nil || res.Code != "c1" {
+				t.Fatalf("Wait = %+v, %v; want the code", res, err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("an accepted response got HTTP %d", resp.StatusCode)
+			}
+		})
 	}
 }

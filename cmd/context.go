@@ -24,6 +24,18 @@ type appCtx struct {
 	// toolCallTimeout, when non-zero, replaces mcpbridge.ToolCallTimeout for this
 	// context's tool calls (tests use a short one).
 	toolCallTimeout time.Duration
+	// tokenSource renews the profile's stored sign-in; built on first use.
+	tokenSource *auth.TokenSource
+}
+
+// tokens returns the profile's token source: every command and the bridge take
+// the stored credential from it, so renewals run one at a time across processes.
+// The sign-in's ending date goes to stderr.
+func (a *appCtx) tokens() *auth.TokenSource {
+	if a.tokenSource == nil {
+		a.tokenSource = auth.NewTokenSource(a.Store, a.Profile.Name, a.httpClient(), a.Printer.Err)
+	}
+	return a.tokenSource
 }
 
 // resolveAppCtx builds the appCtx from global flags + config + env.
