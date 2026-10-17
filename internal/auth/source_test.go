@@ -10,6 +10,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -154,7 +158,8 @@ func saveSignIn(t *testing.T, s *Store, c *Credential) {
 // stand for two givmo processes (each takes the lock file through its own
 // descriptor, as two processes do); the fake server holds the first renewal open
 // long enough for a racing second one to arrive, and revokes the sign-in if it
-// does.
+// does. The third row gives the two processes different GIVMO_HOME values over one
+// keychain sign-in.
 func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 	t.Run("two processes renewing an expiring sign-in renew it once", func(t *testing.T) {
 		f, srv := newFakeTokenServer(t, "test-refresh-0")
@@ -218,11 +223,162 @@ func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 			t.Errorf("the sign-out ended %+v, want the renewed sign-in", ended)
 		}
 	})
+
+	// A keychain sign-in is one item per user, whatever GIVMO_HOME says: a process
+	// whose GIVMO_HOME differs (a shell that exports it, an IDE that does not) reads
+	// and renews the same sign-in, so it must wait for the same lock.
+	t.Run("two GIVMO_HOME values sharing one keychain sign-in renew it once", func(t *testing.T) {
+		storingFakeKeychain(t)
+		f, srv := newFakeTokenServer(t, "test-refresh-0")
+		f.holdFirst()
+		t.Setenv("GIVMO_HOME", t.TempDir())
+		storeA := mustStore(t)
+		t.Setenv("GIVMO_HOME", t.TempDir())
+		storeB := mustStore(t)
+		if storeA.Backend() != "keychain" || storeB.Backend() != "keychain" {
+			t.Fatalf("backends %s and %s, want keychain", storeA.Backend(), storeB.Backend())
+		}
+		saveSignIn(t, storeA, signIn(srv.URL, 10*time.Second, time.Hour))
+		a := NewTokenSource(storeA, "sandbox", srv.Client(), nil)
+		b := NewTokenSource(storeB, "sandbox", srv.Client(), nil)
+
+		results := make(chan error, 2)
+		go func() { _, err := a.Credential(context.Background()); results <- err }()
+		<-f.arrived
+		go func() { _, err := b.Credential(context.Background()); results <- err }()
+		for i := 0; i < 2; i++ {
+			if err := <-results; err != nil {
+				t.Errorf("Credential: %v", err)
+			}
+		}
+		if n := f.count(); n != 1 {
+			t.Errorf("the sign-in was renewed %d times, want once", n)
+		}
+		stored, err := storeB.Load("sandbox")
+		if err != nil || stored.RefreshToken != "test-refresh-1" {
+			t.Errorf("stored sign-in = %v (%v), want the successor test-refresh-1", stored, err)
+		}
+	})
+}
+
+// storingFakeKeychain stands in for macOS `security` and the user's keychain: a
+// shell script, the only program on PATH, that stores each item as a file under a
+// temporary directory (reading `security -i`'s hex line, answering find and delete).
+// It touches no keychain. HOME is a temporary directory too, so nothing the store
+// keeps per user reaches the real one.
+func storingFakeKeychain(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("the keychain backend runs only on macOS")
+	}
+	if _, err := os.Stat("/usr/bin/xxd"); err != nil {
+		t.Skip("the fake keychain decodes its hex with /usr/bin/xxd")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "security"), []byte(storingFakeSecurity), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("FAKE_KEYCHAIN_DIR", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GIVMO_TOKEN_BACKEND", "")
+	t.Setenv("GIVMO_CLIENT_SECRET", "")
+	if path, err := exec.LookPath("security"); err != nil || path != filepath.Join(bin, "security") {
+		t.Fatalf("security resolves to %q (%v), not the fake", path, err)
+	}
+}
+
+const storingFakeSecurity = `#!/bin/sh
+dir="$FAKE_KEYCHAIN_DIR"
+if [ "$1" = "-i" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    set -- $line
+    cmd="$1"; shift
+    acct=""; svc=""; hex=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -a) acct="$2"; shift 2;;
+        -s) svc="$2"; shift 2;;
+        -X) hex="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    [ "$cmd" = "add-generic-password" ] || exit 1
+    item="$dir/$svc.$acct"
+    printf '%s' "$hex" | /usr/bin/xxd -r -p > "$item.tmp.$$" && /bin/mv "$item.tmp.$$" "$item" || exit 1
+  done
+  exit 0
+fi
+cmd="$1"; shift
+acct=""; svc=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -a) acct="$2"; shift 2;;
+    -s) svc="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+item="$dir/$svc.$acct"
+case "$cmd" in
+  find-generic-password) [ -f "$item" ] || exit 44; /bin/cat "$item"; printf '\n';;
+  delete-generic-password) [ -f "$item" ] || exit 44; /bin/rm -f "$item";;
+  *) exit 1;;
+esac
+`
+
+// TestTokenSource_ALockWaitThatEndsIsARetry pins what a renewal that cannot get the
+// profile's lock in time says: whichever deadline ends the wait, the caller's own or
+// the lock's, it is ErrLockTimeout, and a cancelled wait is ErrLockWaitCanceled. Both
+// tell the person to retry; nothing is presented and the stored sign-in is unchanged.
+// A bare context error would reach the CLI's catch-all, whose remediation is to log
+// out, which ends a working sign-in.
+func TestTokenSource_ALockWaitThatEndsIsARetry(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(ctx context.Context) (context.Context, context.CancelFunc)
+		want error
+	}{
+		{name: "the caller's deadline ends the wait", want: ErrLockTimeout,
+			stop: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				return context.WithTimeout(ctx, 100*time.Millisecond)
+			}},
+		{name: "the caller cancels the wait", want: ErrLockWaitCanceled,
+			stop: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(ctx)
+				time.AfterFunc(100*time.Millisecond, cancel)
+				return ctx, cancel
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFakeTokenServer(t, "test-refresh-0")
+			f.holdFirst() // the other process's renewal holds the lock for 500 ms
+			store := newSourceStore(t)
+			saveSignIn(t, store, signIn(srv.URL, 10*time.Second, time.Hour))
+			other := NewTokenSource(store, "sandbox", srv.Client(), nil)
+			done := make(chan error, 1)
+			go func() { _, err := other.Credential(context.Background()); done <- err }()
+			<-f.arrived
+
+			ctx, cancel := tc.stop(context.Background())
+			defer cancel()
+			cred, err := NewTokenSource(mustStore(t), "sandbox", srv.Client(), nil).Credential(ctx)
+			if !errors.Is(err, tc.want) || cred != nil {
+				t.Errorf("Credential = %v, %v; want %v", cred, err, tc.want)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("the other process's renewal: %v", err)
+			}
+			if n := f.count(); n != 1 {
+				t.Errorf("%d renewals, want only the other process's", n)
+			}
+		})
+	}
 }
 
 // TestTokenSource_RenewalOutcomes pins what each answer to a renewal does to the
-// stored sign-in: only invalid_grant ends it; a refused client, a rate limit or
-// a lost answer leave it for the next attempt.
+// stored sign-in: only invalid_grant ends it; a refused client, a rate limit, a
+// server error or a lost answer leave it for the next attempt; and an answer that
+// arrives after the caller's deadline is still taken and stored.
 func TestTokenSource_RenewalOutcomes(t *testing.T) {
 	closedPort := func(t *testing.T) string {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -233,11 +389,12 @@ func TestTokenSource_RenewalOutcomes(t *testing.T) {
 		ln.Close()
 		return "http://" + addr + "/token"
 	}
-	answering := func(status int, header http.Header, body string) func(t *testing.T, seen chan<- *http.Request) string {
+	answeringAfter := func(delay time.Duration, status int, header http.Header, body string) func(t *testing.T, seen chan<- *http.Request) string {
 		return func(t *testing.T, seen chan<- *http.Request) string {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = r.ParseForm()
 				seen <- r.Clone(context.Background())
+				time.Sleep(delay)
 				for k, v := range header {
 					w.Header()[k] = v
 				}
@@ -249,11 +406,16 @@ func TestTokenSource_RenewalOutcomes(t *testing.T) {
 			return srv.URL
 		}
 	}
+	answering := func(status int, header http.Header, body string) func(t *testing.T, seen chan<- *http.Request) string {
+		return answeringAfter(0, status, header, body)
+	}
 	renewedBody := `{"access_token":"test-access-1","token_type":"Bearer","refresh_token":"test-refresh-1","expires_in":1800}`
 	cases := []struct {
 		name       string
 		authMethod string
 		endpoint   func(t *testing.T, seen chan<- *http.Request) string
+		// deadline, when set, is the caller's remaining time for the renewal.
+		deadline   time.Duration
 		check      func(t *testing.T, cred *Credential, err error, seen *http.Request)
 		wantStored string // the refresh token stored afterwards; "" means none
 	}{
@@ -332,6 +494,32 @@ func TestTokenSource_RenewalOutcomes(t *testing.T) {
 			},
 			wantStored: "test-refresh-0",
 		},
+		{
+			name:     "a server error keeps it",
+			endpoint: answering(http.StatusBadGateway, nil, "<html>Bad Gateway</html>"),
+			check: func(t *testing.T, _ *Credential, err error, _ *http.Request) {
+				var te *TokenError
+				if !errors.As(err, &te) || te.Status != http.StatusBadGateway {
+					t.Errorf("err = %v, want a 502 TokenError", err)
+				}
+			},
+			wantStored: "test-refresh-0",
+		},
+		{
+			// Once a refresh token is sent the server may have rotated it, so the
+			// CLI waits for the answer however little of the caller's time is left:
+			// abandoning it would leave the spent token stored, and the next
+			// renewal would end the sign-in.
+			name:     "an answer that arrives after the caller's deadline is still stored",
+			endpoint: answeringAfter(300*time.Millisecond, http.StatusOK, nil, renewedBody),
+			deadline: 100 * time.Millisecond,
+			check: func(t *testing.T, cred *Credential, err error, _ *http.Request) {
+				if err != nil || cred.AccessToken != "test-access-1" {
+					t.Errorf("Credential = %+v, %v; want the renewed token", cred, err)
+				}
+			},
+			wantStored: "test-refresh-1",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -346,7 +534,13 @@ func TestTokenSource_RenewalOutcomes(t *testing.T) {
 				}
 			}
 			saveSignIn(t, store, c)
-			cred, err := NewTokenSource(store, "sandbox", &http.Client{Timeout: 5 * time.Second}, nil).Credential(context.Background())
+			ctx := context.Background()
+			if tc.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+				defer cancel()
+			}
+			cred, err := NewTokenSource(store, "sandbox", &http.Client{Timeout: 5 * time.Second}, nil).Credential(ctx)
 			seen := &http.Request{}
 			select {
 			case seen = <-requests:

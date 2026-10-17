@@ -33,9 +33,12 @@ var (
 	// sign-in is over (revoked, its refresh token presented twice, unused for 14
 	// days, or past its 90-day ceiling). The stored credential has been deleted.
 	ErrSignInEnded = errors.New("the sign-in has ended")
-	// ErrLockTimeout: another givmo process held the profile's lock for longer
-	// than lockWait.
+	// ErrLockTimeout: another givmo process held the profile's lock until the wait's
+	// deadline, lockWait or the caller's own, whichever came first.
 	ErrLockTimeout = errors.New("timed out waiting for another givmo process to finish renewing the sign-in")
+	// ErrLockWaitCanceled: the caller cancelled while another givmo process held
+	// the profile's lock.
+	ErrLockWaitCanceled = errors.New("stopped waiting for another givmo process to finish renewing the sign-in")
 )
 
 // TokenSource gives every command and the MCP bridge the active profile's
@@ -132,7 +135,11 @@ func (s *TokenSource) refresh(ctx context.Context, c *Credential) (*Credential, 
 			return nil, errors.New("renewing this sign-in needs its registered client's secret, and neither GIVMO_CLIENT_SECRET nor the stored one is set")
 		}
 	}
-	tr, err := Refresh(ctx, s.client, RefreshParams{
+	// Once the refresh token is sent the server may have rotated it, so its answer
+	// is waited for even past the caller's own deadline: abandoned, it would leave
+	// the spent token stored for the next renewal to present, ending the sign-in.
+	// The client's own timeout still bounds the request.
+	tr, err := Refresh(context.WithoutCancel(ctx), s.client, RefreshParams{
 		TokenEndpoint: c.TokenEndpoint,
 		ClientID:      c.ClientID,
 		ClientSecret:  secret,
@@ -206,15 +213,25 @@ func (s *TokenSource) SignOut(ctx context.Context, end func(*Credential)) error 
 	})
 }
 
-// withLock runs fn holding the profile's lock, waiting at most lockWait for it.
+// withLock runs fn holding the profile's lock, waiting at most lockWait for it. A
+// wait that ends unfinished is ErrLockTimeout when a deadline ended it, the lock's
+// own or the caller's, and ErrLockWaitCanceled when the caller cancelled it, never
+// a bare context error: the CLI's catch-all for those says to log out, which would
+// end a working sign-in.
 func (s *TokenSource) withLock(ctx context.Context, fn func() error) error {
+	path, err := s.store.lockFilePath(s.profile)
+	if err != nil {
+		return err
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, lockWait)
 	defer cancel()
-	l, err := lockProfile(waitCtx, s.store.fileDir, s.profile)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return ErrLockTimeout
-		}
+	l, err := lockProfile(waitCtx, path)
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return ErrLockTimeout
+	case errors.Is(err, context.Canceled):
+		return ErrLockWaitCanceled
+	case err != nil:
 		return err
 	}
 	defer l.unlock()

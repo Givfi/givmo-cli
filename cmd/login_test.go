@@ -74,6 +74,9 @@ func TestFallbackAuthServerMetadata_ConnectPaths(t *testing.T) {
 	if md.TokenEndpoint != "https://api-dev.givmo.io/connect/oauth/token" {
 		t.Errorf("token endpoint = %q", md.TokenEndpoint)
 	}
+	if md.RevocationEndpoint != "https://api-dev.givmo.io/connect/oauth/revoke" {
+		t.Errorf("revocation endpoint = %q", md.RevocationEndpoint)
+	}
 	if md.Issuer != "https://api-dev.givmo.io" {
 		t.Errorf("issuer = %q", md.Issuer)
 	}
