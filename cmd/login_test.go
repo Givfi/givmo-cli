@@ -102,12 +102,19 @@ func (d stubDiscoverer) AuthServer(context.Context, string) (*auth.AuthServerMet
 	return d.as, nil
 }
 
-// recordingDiscoverer has no protected-resource document, and serves metadata
-// naming as its issuer whatever base it is read from, recording each base.
-type recordingDiscoverer struct{ read []string }
+// recordingDiscoverer serves pr as the protected-resource document (none when
+// nil), and metadata naming as its issuer whatever base it is read from,
+// recording each base.
+type recordingDiscoverer struct {
+	pr   *auth.ProtectedResourceMetadata
+	read []string
+}
 
 func (d *recordingDiscoverer) ProtectedResource(context.Context, string) (*auth.ProtectedResourceMetadata, error) {
-	return nil, errors.New("discovery down")
+	if d.pr == nil {
+		return nil, errors.New("discovery down")
+	}
+	return d.pr, nil
 }
 
 func (d *recordingDiscoverer) AuthServer(_ context.Context, base string) (*auth.AuthServerMetadata, error) {
@@ -122,7 +129,10 @@ func (d *recordingDiscoverer) AuthServer(_ context.Context, base string) (*auth.
 // the server accepts one (exit 6); and on either path a metadata document whose
 // issuer is not the base it was fetched from is refused (RFC 8414 section 3.3).
 // Whichever way the authorization server was found, its address passes the rules
-// before its metadata is read, since a sign-in stores it as its issuer.
+// before its metadata is read, since a sign-in stores it as its issuer. And a
+// protected-resource document is used only when it names the resource the login
+// asks for (RFC 9728 section 3.3); one that names another stops the login before
+// any metadata is read.
 func TestDiscoverAuthServer_MetadataRules(t *testing.T) {
 	const issuer = "https://mcp-dev.givmo.io"
 	served := func(iss string) stubDiscoverer {
@@ -153,6 +163,17 @@ func TestDiscoverAuthServer_MetadataRules(t *testing.T) {
 		{name: "a configured auth base that isn't https is refused before its metadata is read",
 			disc: &recordingDiscoverer{}, authBase: "http://auth.example.test", requireMetadata: true,
 			wantExit: output.ExitValidation},
+		{name: "a document for another resource stops the login before any metadata is read",
+			disc: &recordingDiscoverer{pr: &auth.ProtectedResourceMetadata{Resource: "https://mcp.givmo.io/mcp",
+				AuthorizationServers: []string{"https://mcp.givmo.io"}}},
+			requireMetadata: true, wantExit: output.ExitValidation},
+		{name: "a document naming no resource stops it too",
+			disc:            &recordingDiscoverer{pr: &auth.ProtectedResourceMetadata{AuthorizationServers: []string{issuer}}},
+			requireMetadata: true, wantExit: output.ExitValidation},
+		{name: "a document spelling the resource another way is used",
+			disc: &recordingDiscoverer{pr: &auth.ProtectedResourceMetadata{Resource: "HTTPS://MCP-DEV.GIVMO.IO:443/mcp/",
+				AuthorizationServers: []string{issuer}}},
+			requireMetadata: true, wantAuthorize: issuer + "/connect/oauth/authorize"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			authBase := tc.authBase
@@ -160,8 +181,8 @@ func TestDiscoverAuthServer_MetadataRules(t *testing.T) {
 				authBase = "https://api-dev.givmo.io"
 			}
 			md, err := discoverAuthServer(context.Background(), tc.disc,
-				"https://mcp-dev.givmo.io", authBase, true, tc.requireMetadata)
-			if d, ok := tc.disc.(*recordingDiscoverer); ok && len(d.read) != 0 {
+				issuer+"/mcp", authBase, true, tc.requireMetadata)
+			if d, ok := tc.disc.(*recordingDiscoverer); ok && tc.wantExit != 0 && len(d.read) != 0 {
 				t.Errorf("metadata was read from %q", d.read)
 			}
 			if tc.wantExit != 0 {
@@ -197,7 +218,7 @@ func TestDiscoverAuthServer_FallbackIsTheIssuer(t *testing.T) {
 				t.Fatal(err)
 			}
 			md, err := discoverAuthServer(context.Background(), failingDiscoverer{},
-				prof.Endpoints.APIBase, prof.Endpoints.AuthBase, !prof.IsProduction(), false)
+				prof.Endpoints.APIBase+"/mcp", prof.Endpoints.AuthBase, !prof.IsProduction(), false)
 			if err != nil {
 				t.Fatalf("discoverAuthServer: %v", err)
 			}
@@ -322,8 +343,14 @@ func newFakeGivmo(t *testing.T, cimd bool) *fakeGivmo {
 	t.Helper()
 	g := &fakeGivmo{cimd: cimd}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
+	// The resource's own document (RFC 9728 section 3.1) names it. The root one
+	// names another resource, unlike Givmo's: a login that read it would stop, so
+	// it pins where the login reads.
+	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"resource": g.srv.URL + "/mcp", "authorization_servers": []string{g.srv.URL}})
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"resource": g.srv.URL + "/elsewhere/mcp", "authorization_servers": []string{g.srv.URL}})
 	})
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
 		md := map[string]any{

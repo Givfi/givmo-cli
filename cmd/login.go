@@ -128,18 +128,21 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 
 	app.prodBanner("logging in")
 
-	// 1) Discover the authorization server via the MCP host's protected-resource
+	// 1) Discover the authorization server via the resource's protected-resource
 	//    metadata, then the AS metadata. A client metadata document needs the
 	//    metadata (it says whether the server accepts one); only a registered
 	//    client falls back to the profile's configured auth base with the
 	//    conventional Connect paths when discovery fails.
 	disc := auth.NewDiscoverer()
 	authBase := app.Profile.Endpoints.AuthBase
-	resource := app.Profile.Endpoints.APIBase + "/mcp"
+	// The resource the login is for, the profile's MCP endpoint: the identifier its
+	// protected-resource document must name, and the one the authorize request and
+	// the exchange carry (RFC 8707).
+	resource := strings.TrimRight(app.Profile.Endpoints.APIBase, "/") + "/mcp"
 
 	// allowLoopback: a discovered http://127.0.0.1|localhost AS is tolerated only
 	// off production (sandbox/dev), never in production.
-	asMeta, err := discoverAuthServer(ctx, disc, app.Profile.Endpoints.APIBase, authBase, !app.Profile.IsProduction(), !env.registered())
+	asMeta, err := discoverAuthServer(ctx, disc, resource, authBase, !app.Profile.IsProduction(), !env.registered())
 	if err != nil {
 		return err
 	}
@@ -252,11 +255,15 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	)
 }
 
-// discoverAuthServer resolves the AS metadata. With requireMetadata unset (a
-// registered client) it falls back to the conventional Connect endpoints when
-// discovery is impossible (metadata unreachable); with it set (a client metadata
-// document, which only the metadata says the server accepts) it stops instead,
-// exit 6.
+// discoverAuthServer resolves the AS metadata for resource, the identifier the
+// login asks for. With requireMetadata unset (a registered client) it falls back
+// to the conventional Connect endpoints when discovery is impossible (metadata
+// unreachable); with it set (a client metadata document, which only the metadata
+// says the server accepts) it stops instead, exit 6.
+//
+// The protected-resource document is the resource's own (RFC 9728 section 3.1),
+// and a document that names another resource is not used at all (section 3.3):
+// the login stops there, exit 7, before any metadata is read or browser opened.
 //
 // DEFENSE-IN-DEPTH: a discovered authorization_servers[0] / authorize / token /
 // revocation endpoint is otherwise adopted verbatim. Every address the login
@@ -269,10 +276,18 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 // whichever way it was found, since a sign-in stores it and every load checks it
 // again. And a metadata document must name, as its issuer, the base it was
 // fetched from (RFC 8414 section 3.3).
-func discoverAuthServer(ctx context.Context, disc auth.Discoverer, apiBase, authBase string, allowLoopback, requireMetadata bool) (*auth.AuthServerMetadata, error) {
-	// Try the protected-resource doc to learn the AS, then its metadata.
-	if pr, err := disc.ProtectedResource(ctx, apiBase); err == nil && len(pr.AuthorizationServers) > 0 {
-		authBase = pr.AuthorizationServers[0]
+func discoverAuthServer(ctx context.Context, disc auth.Discoverer, resource, authBase string, allowLoopback, requireMetadata bool) (*auth.AuthServerMetadata, error) {
+	// Try the resource's protected-resource doc to learn the AS, then its metadata.
+	if pr, err := disc.ProtectedResource(ctx, resource); err == nil {
+		if !pr.Describes(resource) {
+			return nil, output.New(output.ExitValidation,
+				fmt.Sprintf("the protected-resource document names its resource as %s, not %s, the resource this login is for", strconv.QuoteToASCII(pr.Resource), resource),
+				"The document describes another resource, so the login doesn't use it (RFC 9728). "+
+					"Verify the profile's api_base (`givmo config view`) and the Connect deployment.")
+		}
+		if len(pr.AuthorizationServers) > 0 {
+			authBase = pr.AuthorizationServers[0]
+		}
 	}
 	authBase = strings.TrimRight(authBase, "/")
 	if serr := validateAuthServerURL(authBase, allowLoopback); serr != nil {

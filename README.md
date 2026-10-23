@@ -207,7 +207,9 @@ client document for the profile's environment
 `https://mcp.givmo.io/connect/oauth/clients/givmo-cli`) and uses no client
 secret. It runs the authorization-code flow with PKCE S256, validates the
 callback's `state`, and, where the authorization server advertises it, checks
-that the callback's `iss` names that server (RFC 9207).
+that the callback's `iss` names that server (RFC 9207). It reads the
+protected-resource document of the resource it signs in to, `<api_base>/mcp`,
+and uses it only when the document names that resource (RFC 9728).
 
 `givmo login` binds a loopback listener on `127.0.0.1` using an OS-assigned
 ephemeral port by default (RFC 8252 loopback redirect). The redirect URI is
