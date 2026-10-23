@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -157,10 +156,64 @@ func TestCredential_AuthorizationHeader(t *testing.T) {
 	}
 }
 
-// fakeSecurity is a stand-in for macOS `security`: a shell script, the only
-// program on PATH, that records its arguments and standard input under dir and
-// exits 0, or, with FAKE_SECURITY_FAIL set, echoes its input in an error and
-// exits 1, as the real one does for a line it cannot run. It touches no keychain.
+// useFakeSecurity makes the keychain backend run script in place of
+// /usr/bin/security for the rest of the test: a stand-in that touches no keychain.
+// It also puts a trap alone on PATH, a `security` that records being run, and
+// returns whether it ran: the store reaches its keychain tool by path alone, so
+// the trap must never run.
+func useFakeSecurity(t *testing.T, script string) (trapped func() bool) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("the keychain backend runs only on macOS")
+	}
+	fake := filepath.Join(t.TempDir(), "security")
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prev := securityPath
+	securityPath = fake
+	t.Cleanup(func() { securityPath = prev })
+
+	mark := filepath.Join(t.TempDir(), "trap-ran")
+	trapDir := t.TempDir()
+	trap := "#!/bin/sh\n: > '" + mark + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(trapDir, "security"), []byte(trap), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", trapDir)
+	return func() bool {
+		_, err := os.Stat(mark)
+		return err == nil
+	}
+}
+
+// TestNewStore_FindsTheKeychainToolAtItsSystemPath: the store finds macOS's
+// keychain tool at /usr/bin/security whatever PATH holds, so with no `security`
+// on PATH at all it still keeps sign-ins in the keychain. Nothing is run.
+func TestNewStore_FindsTheKeychainToolAtItsSystemPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the keychain backend runs only on macOS")
+	}
+	if _, err := os.Stat("/usr/bin/security"); err != nil {
+		t.Skip("this Mac has no /usr/bin/security")
+	}
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("GIVMO_HOME", t.TempDir())
+	t.Setenv("GIVMO_TOKEN_BACKEND", "")
+	s, err := NewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Backend() != "keychain" {
+		t.Errorf("backend = %s with no security on PATH, want keychain: the store's keychain tool is /usr/bin/security, not a PATH lookup", s.Backend())
+	}
+}
+
+// fakeSecurity is a stand-in for macOS's keychain tool: a shell script, run in
+// place of /usr/bin/security, that records its arguments and standard input under
+// dir and exits 0, or, with FAKE_SECURITY_FAIL set, echoes its input in an error
+// and exits 1, as the real one does for a line it cannot run. It touches no
+// keychain.
 const fakeSecurity = `#!/bin/sh
 : > "$FAKE_SECURITY_OUT/argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$FAKE_SECURITY_OUT/argv"; done
@@ -183,16 +236,10 @@ exit 0
 // every process of the user; a credential too long for security's input buffer
 // must not be sent at all, since security would store a truncated item and echo
 // the rest; and security's own output, which can echo its input, must never
-// reach the error.
+// reach the error. The store runs its keychain tool by path, never a `security`
+// found on PATH, where a writable directory ahead of /usr/bin could hold another.
 func TestKeychainStore_KeepsTheCredentialOffTheCommandLine(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("the keychain backend runs only on macOS")
-	}
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "security"), []byte(fakeSecurity), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
+	trapped := useFakeSecurity(t, fakeSecurity)
 	t.Setenv("GIVMO_HOME", t.TempDir())
 	t.Setenv("GIVMO_TOKEN_BACKEND", "")
 
@@ -217,11 +264,6 @@ func TestKeychainStore_KeepsTheCredentialOffTheCommandLine(t *testing.T) {
 			} else {
 				t.Setenv("FAKE_SECURITY_FAIL", "")
 			}
-			// Only the fake may run: with any other security on PATH, stop before
-			// anything is written.
-			if path, err := exec.LookPath("security"); err != nil || path != filepath.Join(bin, "security") {
-				t.Fatalf("security resolves to %q (%v), not the fake", path, err)
-			}
 			s, err := NewStore()
 			if err != nil {
 				t.Fatal(err)
@@ -231,6 +273,9 @@ func TestKeychainStore_KeepsTheCredentialOffTheCommandLine(t *testing.T) {
 			}
 			cred := &Credential{Profile: "sandbox", Type: CredTypeOAuth, AccessToken: tc.access, RefreshToken: refreshToken}
 			saveErr := s.Save(cred)
+			if trapped() {
+				t.Fatal("the store ran the security found on PATH; it must run its keychain tool by path alone")
+			}
 			if (saveErr != nil) != tc.wantError {
 				t.Fatalf("Save error = %v, want error %v", saveErr, tc.wantError)
 			}

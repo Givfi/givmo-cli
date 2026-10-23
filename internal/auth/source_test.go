@@ -11,9 +11,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -228,7 +225,7 @@ func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 	// whose GIVMO_HOME differs (a shell that exports it, an IDE that does not) reads
 	// and renews the same sign-in, so it must wait for the same lock.
 	t.Run("two GIVMO_HOME values sharing one keychain sign-in renew it once", func(t *testing.T) {
-		storingFakeKeychain(t)
+		trapped := storingFakeKeychain(t)
 		f, srv := newFakeTokenServer(t, "test-refresh-0")
 		f.holdFirst()
 		t.Setenv("GIVMO_HOME", t.TempDir())
@@ -258,34 +255,29 @@ func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 		if err != nil || stored.RefreshToken != "test-refresh-1" {
 			t.Errorf("stored sign-in = %v (%v), want the successor test-refresh-1", stored, err)
 		}
+		if trapped() {
+			t.Error("the store ran the security found on PATH; it must run its keychain tool by path alone")
+		}
 	})
 }
 
-// storingFakeKeychain stands in for macOS `security` and the user's keychain: a
-// shell script, the only program on PATH, that stores each item as a file under a
-// temporary directory (reading `security -i`'s hex line, answering find and delete).
-// It touches no keychain. HOME is a temporary directory too, so nothing the store
-// keeps per user reaches the real one.
-func storingFakeKeychain(t *testing.T) {
+// storingFakeKeychain stands in for macOS's keychain tool and the user's keychain:
+// a shell script, run in place of /usr/bin/security, that stores each item as a
+// file under a temporary directory (reading `security -i`'s hex line, answering
+// find and delete). It touches no keychain. HOME is a temporary directory too, so
+// nothing the store keeps per user reaches the real one. It returns whether the
+// trap useFakeSecurity puts on PATH ran, which it never may.
+func storingFakeKeychain(t *testing.T) (trapped func() bool) {
 	t.Helper()
-	if runtime.GOOS != "darwin" {
-		t.Skip("the keychain backend runs only on macOS")
-	}
+	trapped = useFakeSecurity(t, storingFakeSecurity)
 	if _, err := os.Stat("/usr/bin/xxd"); err != nil {
 		t.Skip("the fake keychain decodes its hex with /usr/bin/xxd")
 	}
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "security"), []byte(storingFakeSecurity), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
 	t.Setenv("FAKE_KEYCHAIN_DIR", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GIVMO_TOKEN_BACKEND", "")
 	t.Setenv("GIVMO_CLIENT_SECRET", "")
-	if path, err := exec.LookPath("security"); err != nil || path != filepath.Join(bin, "security") {
-		t.Fatalf("security resolves to %q (%v), not the fake", path, err)
-	}
+	return trapped
 }
 
 const storingFakeSecurity = `#!/bin/sh

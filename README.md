@@ -120,11 +120,12 @@ person's Givmo account, what it can never do, and how to report a security issue
   HTTPS-only guarantee holds across hops and an SSRF redirect to an
   internal/metadata address cannot be reached), time-bounded, and size-capped.
 - **No auth secret in logs or JSON.** Tokens are stored in the OS keychain when
-  available (macOS `security`, which receives them on its standard input, never
-  on a command line), else in `0600` files under `~/.givmo`. A registered
-  client's secret, used only with the `GIVMO_CLIENT_ID` override, is stored the
-  same way, apart from the tokens. They are **never** logged and **never** appear
-  in `--json` output; `whoami` shows scopes and the access token's expiry only.
+  available (macOS's `/usr/bin/security`, run by that path and never looked up
+  on `PATH`; it receives them on its standard input, never on a command line),
+  else in `0600` files under `~/.givmo`. A registered client's secret, used only
+  with the `GIVMO_CLIENT_ID` override, is stored the same way, apart from the
+  tokens. They are **never** logged and **never** appear in `--json` output;
+  `whoami` shows scopes and the access token's expiry only.
 - **Production guardrail.** The `production` profile prints a loud banner before
   any mutating operation.
 
