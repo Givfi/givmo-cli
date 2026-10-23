@@ -13,12 +13,12 @@ import (
 func newWhoamiCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
-		Short: "Show the linked identity and granted scopes (no secrets)",
-		Long: `Print the identity and scopes of the credential stored for the active profile.
-Secrets are never shown: access/refresh tokens are omitted entirely from output
-(both human and --json forms). When the stored sign-in's access token is about
-to expire, whoami renews it first, so "expired" describes the token the next
-command will use.`,
+		Short: "Show the granted scopes and access-token expiry (no secrets)",
+		Long: `Print the scopes and access-token expiry of the credential stored for the active
+profile. Secrets are never shown: access/refresh tokens are omitted entirely
+from output (both human and --json forms). When the stored sign-in's access
+token is about to expire, whoami renews it first, so "expired" describes the
+token the next command will use.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			app, err := resolveAppCtx()
 			if err != nil {
@@ -59,10 +59,6 @@ func runWhoami(ctx context.Context, app *appCtx) error {
 	}
 
 	return app.Printer.Result(view, func(w io.Writer) {
-		subject := cred.Subject
-		if subject == "" {
-			subject = "(not reported)"
-		}
 		scopes := cred.ScopeString()
 		if scopes == "" && cred.Type == auth.CredTypeAPIKey {
 			scopes = "(api-key; scopes determined server-side)"
@@ -70,7 +66,6 @@ func runWhoami(ctx context.Context, app *appCtx) error {
 		output.KeyValues(w, [][2]string{
 			{"profile", app.Profile.Name},
 			{"type", cred.Type},
-			{"subject", subject},
 			{"scopes", scopes},
 			{"expired", boolStr(cred.Expired())},
 			{"storage", app.Store.Backend()},

@@ -53,8 +53,9 @@ func newDonationIntentsCmd() *cobra.Command {
 
 MONEY SAFETY: 'create' returns a secretless, single-use hosted-checkout URL (a
 gco_ token) for the person to open on Givmo. Payment and terms acceptance happen
-only on that page. This CLI never handles a card, a client secret, or a donation id, and
-never accepts terms — it only displays (or, with --open, opens) the checkout URL.
+only on that page. This CLI never handles a card or a client secret, and never
+accepts terms; the donation_intent_id it shows is a non-secret reference. It
+only displays (or, with --open, opens) the checkout URL.
 
 Requires the givmo.donation_intents.create scope (run 'givmo login').`,
 	}

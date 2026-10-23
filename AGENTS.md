@@ -50,8 +50,8 @@ agent operator.
   printed for a human to complete.
 - Non-interactive (CI/agent): set `GIVMO_API_KEY` in the environment, then any
   command authenticates automatically. `givmo login` with the key set stores it.
-- `givmo whoami --json` returns the linked identity + granted scopes. Secrets are
-  never printed. The four consumer scopes are exactly:
+- `givmo whoami --json` returns the granted scopes + the access token's expiry.
+  Secrets are never printed. The four consumer scopes are exactly:
   `givmo.donations.read`, `givmo.receipts.read`, `givmo.giving_summary.read`,
   `givmo.donation_intents.create`.
 

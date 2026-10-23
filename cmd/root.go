@@ -34,7 +34,8 @@ This CLI serves the PUBLIC (catalog) and CONSUMER (user-delegated OAuth) tiers.
 MONEY SAFETY: a donation is created via a secretless, single-use hosted-checkout
 URL (a "gco_" token) for the person to open on Givmo. Payment and terms
 acceptance happen only on that page. This donation path never handles a card or
-payment credential and never accepts terms. It only DISPLAYS the checkout URL.
+payment credential and never accepts terms. It only DISPLAYS the checkout URL,
+or, with 'donation-intents create --open', opens it in a browser.
 
 UNTRUSTED INPUT: donate.json manifests are treated as hostile. The manifest
 commands surface every rejected/sanitized claim.

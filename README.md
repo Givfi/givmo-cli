@@ -48,7 +48,7 @@ givmo config view
 
 # 2. Sign in (OAuth + PKCE in your browser; no client secret).
 givmo login
-givmo whoami                 # linked identity + granted scopes (no secrets)
+givmo whoami                 # the sign-in's scopes and whether its access token has expired (no secrets)
 
 #    Non-interactive / CI:
 GIVMO_API_KEY=… givmo login  # stores the key for the active profile
@@ -124,7 +124,7 @@ person's Givmo account, what it can never do, and how to report a security issue
   on a command line), else in `0600` files under `~/.givmo`. A registered
   client's secret, used only with the `GIVMO_CLIENT_ID` override, is stored the
   same way, apart from the tokens. They are **never** logged and **never** appear
-  in `--json` output; `whoami` shows identity + scopes only.
+  in `--json` output; `whoami` shows scopes and the access token's expiry only.
 - **Production guardrail.** The `production` profile prints a loud banner before
   any mutating operation.
 
@@ -219,8 +219,7 @@ The CLI stays signed in by renewing its access token, one renewal at a time
 across every `givmo` process on the computer, for up to 90 days from your
 consent; 14 days without use ends it sooner. In the last week, commands print
 the date it ends. Where an environment doesn't accept the CLI's sign-in yet,
-`givmo login` says so before opening a browser and exits `6`. On the `sandbox`
-profile, use `GIVMO_API_KEY` if a browser sign-in is not offered.
+`givmo login` says so before opening a browser and exits `6`.
 
 To sign in as your own registered confidential client instead, set
 `GIVMO_CLIENT_ID` and `GIVMO_CLIENT_SECRET`. The CLI reads `GIVMO_CLIENT_SECRET`
