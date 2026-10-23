@@ -165,7 +165,7 @@ Every error — local or from the backend — renders through **one** envelope. 
     "message": "manifest failed strict validation or carried dropped/rejected claims",
     "remediation": "Treat this manifest as untrusted. Do NOT map any of its fields to payee eligibility, deductibility, or receipt/legal copy; those are resolved by the platform, not the manifest.",
     "request_id": "…",
-    "doc_url": "https://developers.givmo.io/cli/errors#validation-error"
+    "doc_url": "https://github.com/givfi/givmo-cli#stable-exit-codes"
   }
 }
 ```

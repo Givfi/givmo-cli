@@ -5,9 +5,10 @@ import (
 	"fmt"
 )
 
-// DocsBaseURL is where the CLI points users/agents for remediation guidance.
-// Every error carries a doc_url derived from this base.
-const DocsBaseURL = "https://developers.givmo.io/cli/errors"
+// DocsURL is where the CLI points users/agents for remediation guidance: the
+// README's table of stable exit codes, which gives every code's meaning and
+// remediation. Every error carries it as its doc_url.
+const DocsURL = "https://github.com/givfi/givmo-cli#stable-exit-codes"
 
 // Error is the ONE error envelope used across every command. It renders
 // identically whether the failure originated locally (validation, config) or
@@ -41,13 +42,13 @@ func (e *Error) Error() string {
 func (e *Error) ExitCode() int { return e.Code }
 
 // New builds an Error with a stable code, message and remediation. The doc_url
-// is filled in automatically from the code's documented name.
+// is filled in automatically: DocsURL, the same for every code.
 func New(code int, message, remediation string) *Error {
 	return &Error{
 		Code:        code,
 		Message:     message,
 		Remediation: remediation,
-		DocURL:      DocsBaseURL + "#" + CodeName(code),
+		DocURL:      DocsURL,
 	}
 }
 
@@ -76,6 +77,6 @@ func AsError(err error) *Error {
 		Code:        ExitGeneric,
 		Message:     err.Error(),
 		Remediation: "Re-run with --json for a machine-readable envelope; consult the doc_url for this error class.",
-		DocURL:      DocsBaseURL + "#" + CodeName(ExitGeneric),
+		DocURL:      DocsURL,
 	}
 }

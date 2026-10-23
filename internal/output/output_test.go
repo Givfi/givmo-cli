@@ -37,8 +37,8 @@ func TestError_EnvelopeFields(t *testing.T) {
 	if e.RequestID != "req-123" {
 		t.Errorf("request_id = %q", e.RequestID)
 	}
-	if e.DocURL == "" || !strings.Contains(e.DocURL, "auth-required") {
-		t.Errorf("doc_url should embed the code name: %q", e.DocURL)
+	if e.DocURL != "https://github.com/givfi/givmo-cli#stable-exit-codes" {
+		t.Errorf("doc_url should be the README's exit-code table: %q", e.DocURL)
 	}
 	if e.ExitCode() != ExitAuth {
 		t.Errorf("ExitCode() = %d", e.ExitCode())
@@ -53,6 +53,10 @@ func TestAsError_WrapsPlainError(t *testing.T) {
 	}
 	if e.Message != "boom" {
 		t.Errorf("message = %q", e.Message)
+	}
+	// The catch-all builds its own envelope; its doc_url is every error's.
+	if e.DocURL != DocsURL {
+		t.Errorf("doc_url = %q, want %q", e.DocURL, DocsURL)
 	}
 	// Wrapped *Error must be preserved verbatim.
 	orig := New(ExitNotFound, "missing", "")
