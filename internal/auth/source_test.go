@@ -237,6 +237,11 @@ func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 			t.Fatalf("backends %s and %s, want keychain", storeA.Backend(), storeB.Backend())
 		}
 		saveSignIn(t, storeA, signIn(srv.URL, 10*time.Second, time.Hour))
+		// The other process reads it back through the keychain tool, never through a
+		// security on PATH, before the race begins.
+		if _, err := storeB.Load("sandbox"); err != nil || trapped() {
+			t.Fatalf("the sign-in doesn't read back through the keychain tool (Load: %v; the PATH trap ran: %v)", err, trapped())
+		}
 		a := NewTokenSource(storeA, "sandbox", srv.Client(), nil)
 		b := NewTokenSource(storeB, "sandbox", srv.Client(), nil)
 
@@ -627,11 +632,13 @@ func (a *answeringTransport) requests() []string {
 // token is handed out, and no request leaves for any of its addresses, its
 // refresh token least of all. It stays stored, so a re-login or a logout can say
 // it was not ended on Givmo's side. Each sign-in here is due for renewal, so one
-// that is used is renewed through its token endpoint at once.
+// that is used is renewed through its token endpoint at once, except a fresh one,
+// whose access token is refused even though no renewal would send anything.
 func TestTokenSource_RefusesAStoredSignInTheRulesRefuse(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		profile   string
+		fresh     bool // its access token is an hour from expiry, so not due
 		edit      func(c *Credential)
 		wantField string // the refused address; "" when the sign-in is used
 		wantErr   error
@@ -651,13 +658,20 @@ func TestTokenSource_RefusesAStoredSignInTheRulesRefuse(t *testing.T) {
 		{name: "an authorization server that isn't https", profile: "sandbox",
 			edit:      func(c *Credential) { c.Issuer = "http://mcp.example.test" },
 			wantField: "authorization server", wantErr: ErrNotHTTPS},
+		{name: "a fresh access token from a sign-in whose token endpoint isn't https", profile: "sandbox", fresh: true,
+			edit:      func(c *Credential) { c.TokenEndpoint = "http://token.example.test/token" },
+			wantField: "token endpoint", wantErr: ErrNotHTTPS},
 		{name: "https throughout, under the production profile", profile: "production", edit: func(*Credential) {}},
 		{name: "a loopback http token endpoint on the sandbox profile", profile: "sandbox",
 			edit: func(c *Credential) { c.TokenEndpoint = "http://127.0.0.1:9/token" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newSourceStore(t)
-			c := signIn("https://mcp.example.test/connect/oauth/token", 10*time.Second, time.Hour)
+			expiresIn := 10 * time.Second
+			if tc.fresh {
+				expiresIn = time.Hour
+			}
+			c := signIn("https://mcp.example.test/connect/oauth/token", expiresIn, time.Hour)
 			c.Profile = tc.profile
 			tc.edit(c)
 			saveSignIn(t, store, c)
