@@ -52,10 +52,10 @@ func newDonationIntentsCmd() *cobra.Command {
 		Long: `Create a donation intent via the create_donation_intent MCP tool.
 
 MONEY SAFETY: 'create' returns a secretless, single-use hosted-checkout URL (a
-gco_ token). Payment and terms acceptance happen only on Givmo's checkout page,
-which is not available yet, so no donation can be completed through this CLI
-today. This CLI never handles a card, a client secret, or a donation id, and
-never accepts terms — it only displays (or, with --open, opens) the checkout URL.
+gco_ token) for the person to open on Givmo. Payment and terms acceptance happen
+only on that page. This CLI never handles a card or a client secret, and never
+accepts terms; the donation_intent_id it shows is a non-secret reference. It
+only displays (or, with --open, opens) the checkout URL.
 
 Requires the givmo.donation_intents.create scope (run 'givmo login').`,
 	}
@@ -170,7 +170,7 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 				}
 			}
 			return app.Printer.Result(di, func(w io.Writer) {
-				fmt.Fprintln(w, "Donation intent created. Payment happens only on Givmo's checkout page, which is not available yet:")
+				fmt.Fprintln(w, "Donation intent created. Open this link on Givmo; payment and terms acceptance happen only on that page:")
 				fmt.Fprintf(w, "\n  %s\n\n", di.CheckoutURL)
 				donationIntentKeyValues(w, di)
 				if generated {
@@ -193,10 +193,12 @@ func newDonationIntentsCreateCmd() *cobra.Command {
 // unknown. No consumer tool reads donation intents back, so "read before
 // retrying" cannot be followed here; the safe next step is a retry with the SAME
 // key, which returns the same donation intent instead of creating a second one.
-// Every other error passes through unchanged.
+// A payment_processing refusal keeps its own remediation: its payment may still be
+// going through, so the next step is to wait for the receipt, not to retry. Every
+// other error passes through unchanged.
 func withIdempotencyRetry(err error, idemKey string) error {
 	oe := output.AsError(err)
-	if oe.Code != output.ExitOutcomeUnknown {
+	if oe.Code != output.ExitOutcomeUnknown || oe.Remediation == paymentProcessingRemediation {
 		return err
 	}
 	named := *oe

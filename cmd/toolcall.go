@@ -50,17 +50,12 @@ type mcpToolResult struct {
 //     required and forwarded as the bearer; scopeHint names the scope for the
 //     no-credential remediation.
 func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any, requireConsumer bool, scopeHint string) (json.RawMessage, error) {
-	authHeader := ""
+	remote := mcpbridge.NewHTTPRemote(a.mcpEndpoint(), "", a.httpClient())
 	if requireConsumer {
-		cred := a.credential()
-		if cred == nil || cred.AuthorizationHeader() == "" {
-			return nil, output.New(output.ExitAuth,
-				"this command requires a consumer credential but none is stored",
-				"Run `givmo login` to authenticate with the "+scopeHint+" scope, or set GIVMO_API_KEY for non-interactive use.")
-		}
-		authHeader = cred.AuthorizationHeader()
+		// The token source gives the request its bearer, renewed when it is about
+		// to expire and once more after a 401.
+		remote.Authorizer = mcpAuthorizer{app: a, required: true, scopeHint: scopeHint}
 	}
-	remote := mcpbridge.NewHTTPRemote(a.mcpEndpoint(), authHeader, a.httpClient())
 	if a.toolCallTimeout > 0 {
 		remote.CallTimeout = a.toolCallTimeout
 	}
@@ -70,6 +65,10 @@ func (a *appCtx) callTool(ctx context.Context, name string, args map[string]any,
 	}
 	raw, rerr := remote.Forward(ctx, "tools/call", json.RawMessage(params))
 	if rerr != nil {
+		if rerr.Err != nil {
+			// No credential could authorize the call, so it was not sent.
+			return nil, rerr.Err
+		}
 		msg := "remote MCP call failed: " + strings.TrimSpace(rerr.Message)
 		switch rerr.Kind {
 		case mcpbridge.KindOutcomeUnknown:
@@ -259,6 +258,10 @@ func toolErrorFromResult(tr mcpToolResult, name string) *output.Error {
 	return toolErrorFromText(text, name, r.Refusal)
 }
 
+// paymentProcessingRemediation is payment_processing's own remediation: the
+// donation's receipt, not another call, says whether its payment went through.
+const paymentProcessingRemediation = "Don't repeat the call now, with this idempotency key or a new one: a payment for this donation may still be going through. Wait for the receipt in the email on the person's Givmo account before trying again."
+
 // toolErrorFromText maps an isError tool result (a raised dispatch error or a refused
 // write) to the CLI envelope, keying on the STABLE error code the backend sends — the
 // structured refusal code when the result carries one, else the code it prefixes onto
@@ -294,6 +297,13 @@ func toolErrorFromText(text, name, refusal string) *output.Error {
 			return output.New(output.ExitAuth,
 				"the MCP tool '"+name+"' found no signed-in donor: "+text,
 				"The Givmo account behind this credential may no longer exist. Run `givmo login` with an active account, then retry.")
+		case code == "payment_processing":
+			// The key replayed a donation whose payment has no final answer yet.
+			// Its outcome is unknown, and changing the request would start a second
+			// donation while the first may still complete.
+			return output.New(output.ExitOutcomeUnknown,
+				"the MCP tool '"+name+"' did not start a new checkout: "+text,
+				paymentProcessingRemediation)
 		case code == "invalid_arguments" || donationRejectionCodes[code]:
 			return validationError()
 		}

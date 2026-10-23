@@ -95,7 +95,11 @@ Structurally complete; execution requires the live sandbox (ready-inert).`,
 			defer cancel()
 
 			body, _ := json.Marshal(map[string]any{"scenarios": selected})
-			resp, err := app.apiClient().Do(ctx, "POST", client.PathSandboxFixturesRun, body, true)
+			cl, err := app.apiClient(ctx)
+			if err != nil {
+				return err
+			}
+			resp, err := cl.Do(ctx, "POST", client.PathSandboxFixturesRun, body, true)
 			if err != nil {
 				return err
 			}

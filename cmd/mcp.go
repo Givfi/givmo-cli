@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"os"
 	"strings"
 
 	"github.com/givfi/givmo-cli/internal/mcpbridge"
@@ -45,18 +44,17 @@ consumer bearer is forwarded to the remote MCP. The remote endpoint is
 			if err != nil {
 				return err
 			}
-			cred := app.credential()
-			authHeader := ""
-			if cred != nil {
-				authHeader = cred.AuthorizationHeader()
-			}
 
+			// Each request takes its bearer from the token source, so the bridge
+			// outlives the 30-minute access token; with nothing stored, requests go
+			// out anonymous, for the public tools.
 			endpoint := strings.TrimRight(app.Profile.Endpoints.APIBase, "/") + "/mcp"
-			remote := mcpbridge.NewHTTPRemote(endpoint, authHeader, app.httpClient())
+			remote := mcpbridge.NewHTTPRemote(endpoint, "", app.httpClient())
+			remote.Authorizer = mcpAuthorizer{app: app}
 
 			srv := mcpbridge.NewServer(mcpbridge.Config{
-				In:      os.Stdin,
-				Out:     os.Stdout,
+				In:      c.InOrStdin(),
+				Out:     c.OutOrStdout(),
 				Remote:  remote,
 				Tools:   splitTools(mcpServeTools),
 				Name:    "givmo-cli-bridge",

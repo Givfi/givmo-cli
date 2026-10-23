@@ -44,12 +44,11 @@ else is the Go standard library.
 
 ```sh
 # 1. Pick an environment (production is the default).
-givmo config use-profile sandbox
 givmo config view
 
-# 2. Authenticate (confidential-client OAuth + PKCE loopback). Opens your browser.
-GIVMO_CLIENT_SECRET=… givmo login
-givmo whoami                 # linked identity + granted scopes (no secrets)
+# 2. Sign in (OAuth + PKCE in your browser; no client secret).
+givmo login
+givmo whoami                 # the sign-in's scopes and whether its access token has expired (no secrets)
 
 #    Non-interactive / CI:
 GIVMO_API_KEY=… givmo login  # stores the key for the active profile
@@ -61,8 +60,8 @@ givmo charities get ch_abc123          # opaque charity_id from search (EIN also
 givmo cause-etfs list
 givmo cause-etfs get <etf-id>
 
-# 4. Create a donation intent (Givmo's checkout page is not available yet).
-givmo donation-intents create --charity ch_abc123 --amount 2500
+# 4. Create a donation — you get a SECRETLESS hosted-checkout URL.
+givmo donation-intents create --charity ch_abc123 --amount 2500 --open
 givmo donation-intents create --cause-etf cetf_123 --amount 5000   # donate to a basket
 
 # 5. Your tax-deductible giving summary for a year.
@@ -73,7 +72,8 @@ givmo manifest validate ./donate.json
 givmo manifest validate https://example.org/.well-known/donate.json
 givmo manifest sign ./donate.json --key ./ed25519-private.pem > signed.donate.json
 
-# 7. Local sandbox developer loop.
+# 7. Local sandbox developer loop (the sandbox profile is Givmo's dev environment).
+givmo config use-profile sandbox
 givmo listen --forward-to localhost:4000
 givmo trigger donation.succeeded --override amount_cents=2500
 givmo fixtures run --list
@@ -102,10 +102,9 @@ person's Givmo account, what it can never do, and how to report a security issue
 
 - **Secretless money rail.** A donation is created via the `create_donation_intent`
   MCP tool, which returns a **single-use, secretless hosted-checkout URL** carrying
-  only an opaque `gco_` token. Payment **and terms acceptance** happen only on
-  Givmo's checkout page, never in the agent or the CLI, and that page is not
-  available yet: no donation can be completed through an agent or the CLI today.
-  The donation path (and any agent driving it) **never**
+  only an opaque `gco_` token, for the person to open on Givmo. Payment **and terms
+  acceptance** happen only on that page, never in the agent or the CLI. The
+  donation path (and any agent driving it) **never**
   handles a card, a payment `client_secret`, or a terms-acceptance token, and
   never accepts terms — it only *displays* the checkout URL (and, with `--open`,
   opens it). The `donation_intent_id` (`dn_…`) it shows is a non-secret reference
@@ -120,10 +119,12 @@ person's Givmo account, what it can never do, and how to report a security issue
   URL inputs are HTTPS-only (the fetch **refuses to follow redirects**, so the
   HTTPS-only guarantee holds across hops and an SSRF redirect to an
   internal/metadata address cannot be reached), time-bounded, and size-capped.
-- **No auth secret in logs or JSON.** Tokens and the OAuth client secret are
-  stored in the OS keychain when available (macOS `security`), else in separate
-  `0600` files under `~/.givmo`. They are **never** logged and **never** appear in
-  `--json` output; `whoami` shows identity + scopes only.
+- **No auth secret in logs or JSON.** Tokens are stored in the OS keychain when
+  available (macOS `security`, which receives them on its standard input, never
+  on a command line), else in `0600` files under `~/.givmo`. A registered
+  client's secret, used only with the `GIVMO_CLIENT_ID` override, is stored the
+  same way, apart from the tokens. They are **never** logged and **never** appear
+  in `--json` output; `whoami` shows scopes and the access token's expiry only.
 - **Production guardrail.** The `production` profile prints a loud banner before
   any mutating operation.
 
@@ -164,7 +165,7 @@ Every error — local or from the backend — renders through **one** envelope. 
     "message": "manifest failed strict validation or carried dropped/rejected claims",
     "remediation": "Treat this manifest as untrusted. Do NOT map any of its fields to payee eligibility, deductibility, or receipt/legal copy; those are resolved by the platform, not the manifest.",
     "request_id": "…",
-    "doc_url": "https://developers.givmo.io/cli/errors#validation-error"
+    "doc_url": "https://github.com/givfi/givmo-cli#stable-exit-codes"
   }
 }
 ```
@@ -189,8 +190,8 @@ refusal code.
 | API base | `GIVMO_API_BASE` | `https://mcp.givmo.io` | `https://mcp-dev.givmo.io` |
 | auth base | `GIVMO_AUTH_BASE` | `https://mcp.givmo.io` | `https://mcp-dev.givmo.io` |
 | API key (CI) | `GIVMO_API_KEY` | — | — |
-| OAuth client id | `GIVMO_CLIENT_ID` | `givmo-cli` (built-in first-party connector id) | `givmo-cli` (built-in first-party connector id) |
-| OAuth client secret | `GIVMO_CLIENT_SECRET` | keychain / 0600 file | keychain / 0600 file |
+| OAuth client id | `GIVMO_CLIENT_ID` | — (Givmo's client document for the profile's environment; no secret) | — (Givmo's client document for the profile's environment; no secret) |
+| OAuth client secret | `GIVMO_CLIENT_SECRET` | only with a registered `GIVMO_CLIENT_ID` | only with a registered `GIVMO_CLIENT_ID` |
 | internal S2S token | `GIVMO_INTERNAL_TOKEN` | — (dark) | — (dark) |
 | config/state dir | `GIVMO_HOME` | `~/.givmo` | `~/.givmo` |
 | token backend | `GIVMO_TOKEN_BACKEND` | keychain (macOS) / file | — |
@@ -199,6 +200,14 @@ Precedence: environment variables > `~/.givmo/config.json` > built-in defaults.
 
 ### Interactive login
 
+`givmo login` signs in as a public native client: it names itself with Givmo's
+client document for the profile's environment
+(`<issuer>/connect/oauth/clients/givmo-cli`; on production
+`https://mcp.givmo.io/connect/oauth/clients/givmo-cli`) and uses no client
+secret. It runs the authorization-code flow with PKCE S256, validates the
+callback's `state`, and, where the authorization server advertises it, checks
+that the callback's `iss` names that server (RFC 9207).
+
 `givmo login` binds a loopback listener on `127.0.0.1` using an OS-assigned
 ephemeral port by default (RFC 8252 loopback redirect). The redirect URI is
 `http://127.0.0.1:<port>/callback` for whichever port it bound, and the Givmo
@@ -206,16 +215,22 @@ authorization server accepts any loopback port. Pass `--port N` to pin the port
 for an authorization server that lacks loopback port flexibility or a
 registered redirect that fixes it.
 
-Interactive login requires a confidential OAuth client secret.
-`GIVMO_CLIENT_ID` overrides the built-in first-party `givmo-cli` client id; set
-it together with `GIVMO_CLIENT_SECRET` to authenticate as your own registered
-confidential client. The CLI reads `GIVMO_CLIENT_SECRET` first, then the active
-profile's separate keychain or 0600 file slot. It never accepts the secret as a
-command-line flag. After the first successful environment-sourced login, the CLI
-stores the secret for subsequent logins. The Givmo authorization server
-currently supports confidential clients only; dynamic and public client
-registration are future capabilities. PKCE S256 and callback `state` validation
-remain enabled alongside client authentication.
+The CLI stays signed in by renewing its access token, one renewal at a time
+across every `givmo` process on the computer, for up to 90 days from your
+consent; 14 days without use ends it sooner. In the last week, commands print
+the date it ends. Where an environment doesn't accept the CLI's sign-in yet,
+`givmo login` says so before opening a browser and exits `6`.
+
+To sign in as your own registered confidential client instead, set
+`GIVMO_CLIENT_ID` and `GIVMO_CLIENT_SECRET`. The CLI reads `GIVMO_CLIENT_SECRET`
+first, then the profile's separate keychain or `0600` file slot, never accepts
+the secret as a command-line flag, and stores an environment-sourced secret
+after the first successful login. An `https` `GIVMO_CLIENT_ID` without a secret
+names your own client metadata document.
+
+`givmo logout` deletes the sign-in on this computer and asks Givmo to end it on
+Givmo's side (RFC 7009). Where Givmo can't end it from the CLI yet, or can't be
+reached, logout says so: **Revoke access** in Connected Apps ends it there.
 
 ## Development
 

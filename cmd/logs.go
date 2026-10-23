@@ -104,7 +104,8 @@ func newLogsTailCmd() *cobra.Command {
 			ctx, cancel := baseContext()
 			defer cancel()
 
-			req, berr := app.apiClient().BuildRequest(ctx, "GET", path, nil)
+			// No consumer credential: the request carries the internal token alone.
+			req, berr := client.New(client.Options{BaseURL: app.Profile.Endpoints.APIBase}).BuildRequest(ctx, "GET", path, nil)
 			if berr != nil {
 				return berr
 			}

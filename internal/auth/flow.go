@@ -9,15 +9,24 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
-// ClientID is the CLI's confidential OAuth client id registered with Givmo
-// Connect. The CLI authenticates with a client secret and also uses PKCE; the
-// Givmo authorization server does not support public clients.
-const ClientID = "givmo-cli"
+// ClientDocumentPath is where each Givmo environment serves givmo-cli's client
+// metadata document, under its authorization server's issuer: on production
+// https://mcp.givmo.io/connect/oauth/clients/givmo-cli. The document's URL is the
+// CLI's client id, a public client with no secret (D-MCP-63).
+const ClientDocumentPath = "/connect/oauth/clients/givmo-cli"
+
+// ClientDocumentURL is Givmo's client document for the authorization server whose
+// issuer identifier is issuer.
+func ClientDocumentURL(issuer string) string {
+	return strings.TrimRight(issuer, "/") + ClientDocumentPath
+}
 
 // ProtectedResourceMetadata is the RFC 9728 document published by the MCP host
 // telling clients which authorization server(s) protect the resource.
@@ -29,11 +38,34 @@ type ProtectedResourceMetadata struct {
 
 // AuthServerMetadata is the RFC 8414 authorization-server metadata document.
 type AuthServerMetadata struct {
-	Issuer                        string   `json:"issuer"`
-	AuthorizationEndpoint         string   `json:"authorization_endpoint"`
-	TokenEndpoint                 string   `json:"token_endpoint"`
-	ScopesSupported               []string `json:"scopes_supported,omitempty"`
-	CodeChallengeMethodsSupported []string `json:"code_challenge_methods_supported,omitempty"`
+	Issuer                            string   `json:"issuer"`
+	AuthorizationEndpoint             string   `json:"authorization_endpoint"`
+	TokenEndpoint                     string   `json:"token_endpoint"`
+	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
+	ScopesSupported                   []string `json:"scopes_supported,omitempty"`
+	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported,omitempty"`
+	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
+	// ClientIDMetadataDocumentSupported says the server takes a client metadata
+	// document's URL as a client id.
+	ClientIDMetadataDocumentSupported bool `json:"client_id_metadata_document_supported,omitempty"`
+	// AuthorizationResponseIssParameterSupported says every authorization
+	// response carries iss (RFC 9207).
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
+}
+
+// AcceptsClientDocuments reports whether the server signs in a client named by a
+// client metadata document as a public client: it advertises the documents, and
+// "none" among its token endpoint's authentication methods.
+func (m *AuthServerMetadata) AcceptsClientDocuments() bool {
+	if m == nil || !m.ClientIDMetadataDocumentSupported {
+		return false
+	}
+	for _, method := range m.TokenEndpointAuthMethodsSupported {
+		if method == AuthMethodNone {
+			return true
+		}
+	}
+	return false
 }
 
 // Discoverer fetches OAuth metadata. It is an interface so tests can inject a
@@ -130,6 +162,23 @@ type LoopbackResult struct {
 	Code  string
 	State string
 	Err   string // the OAuth `error` param, if the AS reported one
+	// Iss is the authorization server's issuer the response names (RFC 9207).
+	Iss string
+}
+
+// IssuerError is an authorization response that did not come from the
+// authorization server the login started at: its iss names another, or it
+// carried none where the server advertises iss (RFC 9207).
+type IssuerError struct {
+	Expected string
+	Got      string
+}
+
+func (e *IssuerError) Error() string {
+	if e.Got == "" {
+		return fmt.Sprintf("the sign-in response did not come from %s (it carried no iss)", e.Expected)
+	}
+	return fmt.Sprintf("the sign-in response did not come from %s (its iss was %q)", e.Expected, e.Got)
 }
 
 // LoopbackListener runs a localhost HTTP server to catch the authorization
@@ -141,6 +190,19 @@ type LoopbackListener struct {
 	resultCh    chan LoopbackResult
 	RedirectURI string
 	expectState string
+	// expectIss is the issuer a response's iss must name, when set; issRequired
+	// says the server advertises iss, so a response must carry it.
+	expectIss   string
+	issRequired bool
+}
+
+// ExpectIssuer makes the listener check each response's iss parameter (RFC 9207
+// section 2.4): an iss that is present must equal issuer, by simple string
+// comparison, whether or not the server advertises iss; with required set (it
+// does), a response without one is refused too. Call it before Serve.
+func (l *LoopbackListener) ExpectIssuer(issuer string, required bool) {
+	l.expectIss = issuer
+	l.issRequired = required
 }
 
 // NewLoopbackListener binds 127.0.0.1 on port with the given callback path
@@ -174,13 +236,14 @@ func (l *LoopbackListener) handle(w http.ResponseWriter, r *http.Request) {
 		Code:  q.Get("code"),
 		State: q.Get("state"),
 		Err:   q.Get("error"),
+		Iss:   q.Get("iss"),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if res.Err != "" || res.Code == "" {
+	if res.Code == "" || l.check(res) != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, "<h1>Givmo CLI login failed</h1><p>You can close this window and return to the terminal.</p>")
+		io.WriteString(w, "<h1>givmo-cli: sign-in failed.</h1><p>You can close this tab and return to the terminal.</p>")
 	} else {
-		io.WriteString(w, "<h1>Givmo CLI login complete</h1><p>You can close this window and return to the terminal.</p>")
+		io.WriteString(w, "<h1>givmo-cli: signed in.</h1><p>You can close this tab and return to the terminal.</p>")
 	}
 	// Deliver exactly once.
 	select {
@@ -196,20 +259,36 @@ func (l *LoopbackListener) Serve() {
 }
 
 // Wait blocks until the callback arrives, ctx is done, or timeout elapses. It
-// validates the returned state against the expected value (anti-CSRF).
+// validates the returned state against the expected value (anti-CSRF), and the
+// iss parameter as ExpectIssuer set (an *IssuerError when it fails).
 func (l *LoopbackListener) Wait(ctx context.Context) (LoopbackResult, error) {
 	select {
 	case <-ctx.Done():
 		return LoopbackResult{}, ctx.Err()
 	case res := <-l.resultCh:
-		if res.Err != "" {
-			return res, fmt.Errorf("authorization server returned error %q", res.Err)
-		}
-		if res.State != l.expectState {
-			return LoopbackResult{}, errors.New("state mismatch on callback (possible CSRF); aborting login")
+		if err := l.check(res); err != nil {
+			if res.Err != "" {
+				return res, err
+			}
+			return LoopbackResult{}, err
 		}
 		return res, nil
 	}
+}
+
+// check validates one authorization response: the server's own error first,
+// then state, then iss.
+func (l *LoopbackListener) check(res LoopbackResult) error {
+	if res.Err != "" {
+		return fmt.Errorf("authorization server returned error %q", res.Err)
+	}
+	if res.State != l.expectState {
+		return errors.New("state mismatch on callback (possible CSRF); aborting login")
+	}
+	if l.expectIss != "" && (res.Iss != "" || l.issRequired) && res.Iss != l.expectIss {
+		return &IssuerError{Expected: l.expectIss, Got: res.Iss}
+	}
+	return nil
 }
 
 // Close shuts down the loopback server.
@@ -231,11 +310,16 @@ type TokenResponse struct {
 type ExchangeParams struct {
 	TokenEndpoint string
 	ClientID      string
-	ClientSecret  string
-	Code          string
-	RedirectURI   string
-	CodeVerifier  string
-	Resource      string
+	// ClientSecret is a registered client's secret, sent only with
+	// AuthMethodClientSecretBasic.
+	ClientSecret string
+	// AuthMethod is how the client authenticates: AuthMethodNone (a public
+	// client, its client_id in the form) or AuthMethodClientSecretBasic.
+	AuthMethod   string
+	Code         string
+	RedirectURI  string
+	CodeVerifier string
+	Resource     string
 }
 
 // clientSecretBasicHeader builds RFC 6749 section 2.3.1 client_secret_basic
@@ -274,7 +358,9 @@ func ExchangeCode(ctx context.Context, client *http.Client, p ExchangeParams) (*
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	if p.ClientSecret != "" {
+	// The method decides, never a secret that happens to be at hand: the server
+	// refuses any secret from a public client.
+	if p.AuthMethod == AuthMethodClientSecretBasic {
 		req.Header.Set("Authorization", clientSecretBasicHeader(p.ClientID, p.ClientSecret))
 	}
 	resp, err := client.Do(req)
@@ -294,6 +380,170 @@ func ExchangeCode(ctx context.Context, client *http.Client, p ExchangeParams) (*
 		return nil, fmt.Errorf("token endpoint returned HTTP %d with no access_token", resp.StatusCode)
 	}
 	return &tr, nil
+}
+
+// The client authentication methods the CLI uses at the token and revocation
+// endpoints (their RFC 8414 names).
+const (
+	// AuthMethodNone is a public client's: no secret, the client_id in the form.
+	AuthMethodNone = "none"
+	// AuthMethodClientSecretBasic is a registered confidential client's: its id
+	// and secret in an HTTP Basic header (RFC 6749 section 2.3.1).
+	AuthMethodClientSecretBasic = "client_secret_basic"
+)
+
+// TokenError is an error answer from the token or revocation endpoint: the OAuth
+// error code and description it sent (RFC 6749 section 5.2), or only an HTTP
+// status when the body named none.
+type TokenError struct {
+	Status      int
+	Code        string
+	Description string
+	// RetryAfter is the answer's Retry-After header, verbatim.
+	RetryAfter string
+}
+
+func (e *TokenError) Error() string {
+	switch {
+	case e.Code != "" && e.Description != "":
+		return e.Code + ": " + e.Description
+	case e.Code != "":
+		return e.Code
+	default:
+		return fmt.Sprintf("HTTP %d", e.Status)
+	}
+}
+
+// TransportError is a request to the token or revocation endpoint that got no
+// answer. Sent says whether the whole request was written to the connection
+// first, so the server may have acted on it.
+type TransportError struct {
+	Sent bool
+	Err  error
+}
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// postForm posts form to endpoint, authenticating the client by authMethod:
+// AuthMethodClientSecretBasic sends the Basic header, AuthMethodNone nothing
+// (the form carries the client_id). It returns the answer's status, header and
+// body (at most 1 MiB), or a *TransportError when none arrived.
+func postForm(ctx context.Context, client *http.Client, endpoint string, form url.Values, authMethod, clientID, secret string) (int, http.Header, []byte, error) {
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+	var sent atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				sent.Store(true)
+			}
+		},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return 0, nil, nil, &TransportError{Err: err}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if authMethod == AuthMethodClientSecretBasic {
+		req.Header.Set("Authorization", clientSecretBasicHeader(clientID, secret))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, nil, &TransportError{Sent: sent.Load(), Err: err}
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, nil, nil, &TransportError{Sent: true, Err: err}
+	}
+	return resp.StatusCode, resp.Header, body, nil
+}
+
+// tokenError decodes an error answer's OAuth error fields.
+func tokenError(status int, header http.Header, body []byte) *TokenError {
+	e := &TokenError{Status: status, RetryAfter: strings.TrimSpace(header.Get("Retry-After"))}
+	var fields struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	if json.Unmarshal(body, &fields) == nil {
+		e.Code, e.Description = fields.Error, fields.ErrorDescription
+	}
+	return e
+}
+
+// RefreshParams captures one renewal of a sign-in (RFC 6749 section 6).
+type RefreshParams struct {
+	TokenEndpoint string
+	ClientID      string
+	// ClientSecret is a registered client's secret, sent only with
+	// AuthMethodClientSecretBasic.
+	ClientSecret string
+	AuthMethod   string
+	RefreshToken string
+}
+
+// Refresh presents the refresh token at the token endpoint and returns the new
+// tokens. The authorization server rotates the refresh token on every renewal
+// and ends the whole sign-in when one is presented twice, so a caller must never
+// present the same one concurrently (see TokenSource). An error answer returns a
+// *TokenError, no answer a *TransportError.
+func Refresh(ctx context.Context, client *http.Client, p RefreshParams) (*TokenResponse, error) {
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", p.RefreshToken)
+	form.Set("client_id", p.ClientID)
+	status, header, body, err := postForm(ctx, client, p.TokenEndpoint, form, p.AuthMethod, p.ClientID, p.ClientSecret)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, tokenError(status, header, body)
+	}
+	var tr TokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil || tr.AccessToken == "" {
+		// The server answered, and may have rotated the refresh token, but its new
+		// tokens did not arrive: for the caller that is a lost answer.
+		return nil, &TransportError{Sent: true, Err: errors.New("the token endpoint's answer carried no access token")}
+	}
+	return &tr, nil
+}
+
+// RevokeParams captures one revocation request (RFC 7009).
+type RevokeParams struct {
+	Endpoint string
+	ClientID string
+	// ClientSecret is a registered client's secret, sent only with
+	// AuthMethodClientSecretBasic.
+	ClientSecret string
+	AuthMethod   string
+	Token        string
+	// TokenTypeHint is "refresh_token" or "access_token".
+	TokenTypeHint string
+}
+
+// Revoke asks the authorization server to revoke a token (RFC 7009). Revoking a
+// sign-in's refresh token ends the whole sign-in, its access tokens with it. The
+// server answers 200 alike for a token it revoked and one it does not know; an
+// error answer returns a *TokenError, no answer a *TransportError.
+func Revoke(ctx context.Context, client *http.Client, p RevokeParams) error {
+	form := url.Values{}
+	form.Set("token", p.Token)
+	if p.TokenTypeHint != "" {
+		form.Set("token_type_hint", p.TokenTypeHint)
+	}
+	form.Set("client_id", p.ClientID)
+	status, header, body, err := postForm(ctx, client, p.Endpoint, form, p.AuthMethod, p.ClientID, p.ClientSecret)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return tokenError(status, header, body)
+	}
+	return nil
 }
 
 // CredentialFromToken converts a TokenResponse into a stored Credential.

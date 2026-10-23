@@ -55,6 +55,9 @@ type rpcError struct {
 	Kind ErrorKind `json:"-"`
 	// RetryAfter is a rate-limited answer's Retry-After header, verbatim.
 	RetryAfter string `json:"-"`
+	// Err is the Authorizer's own error when it could not authorize the request,
+	// for callers that report it as it is. It never reaches the wire.
+	Err error `json:"-"`
 }
 
 // ErrorKind classifies a failure of a request to the remote MCP.
