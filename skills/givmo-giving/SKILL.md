@@ -67,10 +67,11 @@ beyond them.
 
 Reading a donor's giving requires their linked, consent-granted Givmo identity.
 With the CLI this is `givmo login` (an interactive OAuth authorization-code +
-PKCE flow in the browser); `givmo whoami` shows the linked subject and granted
-scopes. Over MCP the server presents the same linked identity. If a
-read-my-giving request comes in and no identity is linked, tell the user to run
-`givmo login` (or link their account) first — do not fabricate giving data.
+PKCE flow in the browser); `givmo whoami` shows the granted scopes and whether
+the access token has expired. Over MCP the server presents the same linked
+identity. If a read-my-giving request comes in and no identity is linked, tell
+the user to run `givmo login` (or link their account) first — do not fabricate
+giving data.
 
 ## Typical flows
 
