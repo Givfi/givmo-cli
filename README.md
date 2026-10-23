@@ -32,7 +32,7 @@ envelope.
 ## Install
 
 ```sh
-go install github.com/givfi/givmo-cli@latest
+go install github.com/givfi/givmo-cli/cmd/givmo@latest
 # or from a checkout:
 go build -o givmo . && mv givmo /usr/local/bin/
 ```
