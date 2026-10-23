@@ -44,6 +44,9 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 		body        string
 		unreachable bool
 		earlier     bool // a credential saved by an earlier givmo
+		// production stores the sign-in under the production profile, where its
+		// revocation endpoint, this test's loopback http server, is refused.
+		production  bool
 		wantRevoked bool
 		wantReason  string
 	}{
@@ -54,6 +57,8 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 		{name: "Givmo cannot be reached", unreachable: true, wantReason: "Givmo could not be reached"},
 		{name: "a sign-in saved by an earlier givmo", earlier: true,
 			wantReason: "an earlier version of givmo saved it without what's needed to end it from here"},
+		{name: "a sign-in whose revocation endpoint the production profile refuses", production: true,
+			status: http.StatusOK, body: `{}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -74,9 +79,15 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 			if tc.unreachable {
 				revocation = closed(t)
 			}
+			profile, wantReason := config.ProfileSandbox, tc.wantReason
+			if tc.production {
+				profile = config.ProfileProduction
+				app.Profile.Name = profile
+				wantReason = fmt.Sprintf("its revocation endpoint, %q, isn't https, so the CLI doesn't use it", revocation)
+			}
 			signIn := func() {
 				cred := &auth.Credential{
-					Profile: config.ProfileSandbox, Type: auth.CredTypeOAuth, AccessToken: "test-access-0",
+					Profile: profile, Type: auth.CredTypeOAuth, AccessToken: "test-access-0",
 					RefreshToken: "test-refresh-0", ExpiresAt: time.Now().Add(time.Hour),
 				}
 				if !tc.earlier {
@@ -85,6 +96,9 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 					cred.RevocationEndpoint = revocation
 					cred.AuthMethod = auth.AuthMethodNone
 					cred.GrantedAt = time.Now()
+				}
+				if tc.production {
+					cred.TokenEndpoint = "https://mcp.example.test/connect/oauth/token"
 				}
 				if err := app.Store.Save(cred); err != nil {
 					t.Fatal(err)
@@ -98,7 +112,7 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 				if err := runLogout(context.Background(), app); err != nil {
 					t.Fatalf("logout: %v", err)
 				}
-				if _, err := app.Store.Load(config.ProfileSandbox); !errors.Is(err, auth.ErrNoCredential) {
+				if _, err := app.Store.Load(profile); !errors.Is(err, auth.ErrNoCredential) {
 					t.Errorf("the sign-in is still stored on this computer (Load: %v)", err)
 				}
 				if asJSON {
@@ -110,16 +124,16 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 						t.Errorf("logout --json = %v, want logged_out and revoked %v", view, tc.wantRevoked)
 					}
 					reason, _ := view["revoke_error"].(string)
-					if !strings.HasPrefix(reason, tc.wantReason) || (tc.wantRevoked && reason != "") {
-						t.Errorf("revoke_error = %q, want %q", reason, tc.wantReason)
+					if !strings.HasPrefix(reason, wantReason) || (tc.wantRevoked && reason != "") {
+						t.Errorf("revoke_error = %q, want %q", reason, wantReason)
 					}
 					continue
 				}
-				want := fmt.Sprintf("Cleared credentials for profile %q.\n", config.ProfileSandbox)
+				want := fmt.Sprintf("Cleared credentials for profile %q.\n", profile)
 				if tc.wantRevoked {
 					want += "Asked Givmo to end the sign-in; it accepted.\n"
 				} else {
-					want += "The sign-in is not ended on Givmo's side: " + tc.wantReason
+					want += "The sign-in is not ended on Givmo's side: " + wantReason
 				}
 				if got := out.String(); !strings.HasPrefix(got, want) {
 					t.Errorf("logout said %q, want %q…", got, want)
@@ -128,7 +142,7 @@ func TestLogout_EndsTheSignInOnGivmosSideWhereItCan(t *testing.T) {
 
 			mu.Lock()
 			defer mu.Unlock()
-			if tc.earlier || tc.unreachable {
+			if tc.earlier || tc.unreachable || tc.production {
 				if len(requests) != 0 {
 					t.Errorf("%d revocation requests reached the server, want none", len(requests))
 				}

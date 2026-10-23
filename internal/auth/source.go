@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/givfi/givmo-cli/internal/config"
 )
 
 // RenewWindow is how close to its expiry an access token is renewed before it is
@@ -70,13 +72,18 @@ func NewTokenSource(store *Store, profile string, client *http.Client, notices i
 // Credential returns the stored credential, renewed first when its access token
 // expires within RenewWindow. It returns (nil, nil) when nothing is stored. A
 // credential that cannot be renewed (an API key, or a sign-in saved by an earlier
-// givmo) is returned as stored.
+// givmo) is returned as stored. A sign-in carrying an address CheckAddress
+// refuses is not returned: a *StoredAddressError says which, and the sign-in
+// stays stored.
 func (s *TokenSource) Credential(ctx context.Context) (*Credential, error) {
 	c, err := s.store.Load(s.profile)
 	if errors.Is(err, ErrNoCredential) {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := c.CheckAddresses(s.allowLoopback()); err != nil {
 		return nil, err
 	}
 	if c.Renewable() && c.expiresWithin(RenewWindow) {
@@ -109,6 +116,9 @@ func (s *TokenSource) renew(ctx context.Context, seen string, force bool) (*Cred
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		if err := c.CheckAddresses(s.allowLoopback()); err != nil {
 			return err
 		}
 		due := c.expiresWithin(RenewWindow) || (force && c.AuthorizationHeader() == seen)
@@ -211,6 +221,12 @@ func (s *TokenSource) SignOut(ctx context.Context, end func(*Credential)) error 
 		}
 		return s.store.Delete(s.profile)
 	})
+}
+
+// allowLoopback says whether the profile's sign-ins may use http to a loopback
+// address (CheckAddress): never the production profile's.
+func (s *TokenSource) allowLoopback() bool {
+	return s.profile != config.ProfileProduction
 }
 
 // withLock runs fn holding the profile's lock, waiting at most lockWait for it. A

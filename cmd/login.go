@@ -5,9 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -260,21 +259,24 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 // exit 6.
 //
 // DEFENSE-IN-DEPTH: a discovered authorization_servers[0] / authorize / token /
-// revocation endpoint is otherwise adopted verbatim. We reject any non-https
-// discovered AS URL so a compromised or spoofed protected-resource document
-// cannot point the login flow (and the PKCE code) at a plaintext or
-// attacker-controlled origin. A loopback http URL (127.0.0.1 / localhost / ::1)
-// is permitted ONLY when allowLoopback is true (sandbox/dev profiles), never in
-// production. And a metadata document must name, as its issuer, the base it was
+// revocation endpoint is otherwise adopted verbatim. Every address the login
+// adopts passes auth.CheckAddress before it is used: https with an ASCII host, so
+// a compromised or spoofed protected-resource document cannot point the login
+// flow (and the PKCE code) at a plaintext, attacker-controlled or look-alike
+// origin. A loopback http URL (127.0.0.1 / localhost / ::1) is permitted ONLY
+// when allowLoopback is true (sandbox/dev profiles), never in production. The
+// authorization server's own address is checked before its metadata is read,
+// whichever way it was found, since a sign-in stores it and every load checks it
+// again. And a metadata document must name, as its issuer, the base it was
 // fetched from (RFC 8414 section 3.3).
 func discoverAuthServer(ctx context.Context, disc auth.Discoverer, apiBase, authBase string, allowLoopback, requireMetadata bool) (*auth.AuthServerMetadata, error) {
 	// Try the protected-resource doc to learn the AS, then its metadata.
 	if pr, err := disc.ProtectedResource(ctx, apiBase); err == nil && len(pr.AuthorizationServers) > 0 {
-		cand := strings.TrimRight(pr.AuthorizationServers[0], "/")
-		if serr := validateAuthServerURL(cand, allowLoopback); serr != nil {
-			return nil, serr
-		}
-		authBase = cand
+		authBase = pr.AuthorizationServers[0]
+	}
+	authBase = strings.TrimRight(authBase, "/")
+	if serr := validateAuthServerURL(authBase, allowLoopback); serr != nil {
+		return nil, serr
 	}
 	md, err := disc.AuthServer(ctx, authBase)
 	if err == nil && (md.AuthorizationEndpoint == "" || md.TokenEndpoint == "") {
@@ -304,13 +306,8 @@ func discoverAuthServer(ctx context.Context, disc auth.Discoverer, apiBase, auth
 			"could not read the Givmo authorization server's metadata: "+err.Error(),
 			"Check connectivity and the active profile's api_base (`givmo config view`), then re-run `givmo login`.")
 	}
-	// Fallback to conventional Connect endpoints under the (already-validated or
-	// profile-supplied) auth base.
-	base := strings.TrimRight(authBase, "/")
-	if serr := validateAuthServerURL(base, allowLoopback); serr != nil {
-		return nil, serr
-	}
-	return fallbackAuthServerMetadata(base), nil
+	// Fallback to conventional Connect endpoints under the auth base, checked above.
+	return fallbackAuthServerMetadata(authBase), nil
 }
 
 // clientEnv is what the environment says about the OAuth client: GIVMO_CLIENT_ID,
@@ -398,36 +395,27 @@ func fallbackAuthServerMetadata(base string) *auth.AuthServerMetadata {
 	}
 }
 
-// validateAuthServerURL enforces https on an authorization-server URL, allowing
-// http only for loopback hosts and only when allowLoopback is set. Pure →
-// unit-tested.
+// validateAuthServerURL applies auth.CheckAddress, the rules an
+// authorization-server address meets at login and again whenever a stored
+// sign-in is loaded, and answers a refusal in login's envelope, exit 7: https
+// with an ASCII host, http only for a loopback host and only when allowLoopback
+// is set. Pure → unit-tested.
 func validateAuthServerURL(raw string, allowLoopback bool) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	switch err := auth.CheckAddress(raw, allowLoopback); {
+	case err == nil:
+		return nil
+	case errors.Is(err, auth.ErrNotURL):
 		return output.New(output.ExitValidation,
 			"discovered authorization server URL is not a valid URL: "+raw,
 			"The auth-server metadata is malformed; verify the profile's auth_base and the Connect deployment.")
-	}
-	if u.Scheme == "https" {
-		return nil
-	}
-	if u.Scheme == "http" && allowLoopback && isLoopbackHost(u.Hostname()) {
-		return nil
+	case errors.Is(err, auth.ErrHostNotASCII):
+		return output.New(output.ExitValidation,
+			"refusing an authorization server URL that spells its host with characters outside ASCII: "+strconv.QuoteToASCII(raw),
+			"Givmo's addresses are written in ASCII; a host with other characters can pass for a different one. "+
+				"Verify the profile's api_base and auth_base (`givmo config view`) and the Connect deployment.")
 	}
 	return output.New(output.ExitValidation,
 		"refusing a non-https authorization server URL: "+raw,
 		"The discovered auth server must use https (loopback http is allowed only on the sandbox/dev profile). "+
 			"This guards against a spoofed protected-resource document redirecting login to a plaintext or attacker origin.")
-}
-
-// isLoopbackHost reports whether host is a loopback address/name.
-func isLoopbackHost(host string) bool {
-	switch strings.ToLower(host) {
-	case "localhost", "127.0.0.1", "::1", "[::1]":
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
 }

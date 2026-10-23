@@ -102,11 +102,27 @@ func (d stubDiscoverer) AuthServer(context.Context, string) (*auth.AuthServerMet
 	return d.as, nil
 }
 
+// recordingDiscoverer has no protected-resource document, and serves metadata
+// naming as its issuer whatever base it is read from, recording each base.
+type recordingDiscoverer struct{ read []string }
+
+func (d *recordingDiscoverer) ProtectedResource(context.Context, string) (*auth.ProtectedResourceMetadata, error) {
+	return nil, errors.New("discovery down")
+}
+
+func (d *recordingDiscoverer) AuthServer(_ context.Context, base string) (*auth.AuthServerMetadata, error) {
+	d.read = append(d.read, base)
+	return &auth.AuthServerMetadata{Issuer: base, AuthorizationEndpoint: "https://mcp-dev.givmo.io/connect/oauth/authorize",
+		TokenEndpoint: "https://mcp-dev.givmo.io/connect/oauth/token"}, nil
+}
+
 // TestDiscoverAuthServer_MetadataRules pins discovery's three rules: a registered
 // client falls back to the conventional Connect paths when the metadata cannot be
 // read; a client metadata document cannot, since only the metadata says whether
 // the server accepts one (exit 6); and on either path a metadata document whose
 // issuer is not the base it was fetched from is refused (RFC 8414 section 3.3).
+// Whichever way the authorization server was found, its address passes the rules
+// before its metadata is read, since a sign-in stores it as its issuer.
 func TestDiscoverAuthServer_MetadataRules(t *testing.T) {
 	const issuer = "https://mcp-dev.givmo.io"
 	served := func(iss string) stubDiscoverer {
@@ -119,6 +135,7 @@ func TestDiscoverAuthServer_MetadataRules(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		disc            auth.Discoverer
+		authBase        string // the profile's; "" is https://api-dev.givmo.io
 		requireMetadata bool
 		wantExit        int
 		wantAuthorize   string
@@ -133,10 +150,20 @@ func TestDiscoverAuthServer_MetadataRules(t *testing.T) {
 			wantExit: output.ExitValidation},
 		{name: "a registered client refuses it too", disc: served("https://elsewhere.example.test"),
 			wantExit: output.ExitValidation},
+		{name: "a configured auth base that isn't https is refused before its metadata is read",
+			disc: &recordingDiscoverer{}, authBase: "http://auth.example.test", requireMetadata: true,
+			wantExit: output.ExitValidation},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			authBase := tc.authBase
+			if authBase == "" {
+				authBase = "https://api-dev.givmo.io"
+			}
 			md, err := discoverAuthServer(context.Background(), tc.disc,
-				"https://mcp-dev.givmo.io", "https://api-dev.givmo.io", true, tc.requireMetadata)
+				"https://mcp-dev.givmo.io", authBase, true, tc.requireMetadata)
+			if d, ok := tc.disc.(*recordingDiscoverer); ok && len(d.read) != 0 {
+				t.Errorf("metadata was read from %q", d.read)
+			}
 			if tc.wantExit != 0 {
 				if got := output.AsError(err); err == nil || got.Code != tc.wantExit {
 					t.Fatalf("discoverAuthServer = %+v, %v; want exit %d", md, err, tc.wantExit)
@@ -201,6 +228,10 @@ func TestValidateAuthServerURL_SchemeGuard(t *testing.T) {
 		{"http non-loopback rejected even off-prod", "http://169.254.169.254/latest", true, false},
 		{"http public host rejected even off-prod", "http://evil.example/authorize", true, false},
 		{"garbage rejected", "::::not a url", false, false},
+		{"a host in fullwidth letters rejected", "https://ｍｃｐ.givmo.io/connect/oauth/token", false, false},
+		{"the same host percent-encoded rejected", "https://%EF%BD%8D%EF%BD%83%EF%BD%90.givmo.io/connect/oauth/token", false, false},
+		{"an ideographic full stop rejected, even loopback-tolerant", "https://mcp%E3%80%82givmo.io/connect/oauth/token", true, false},
+		{"an internationalized name in its xn-- form ok", "https://xn--mcp-dk1d.givmo.io/connect/oauth/token", false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,18 +248,11 @@ func TestValidateAuthServerURL_SchemeGuard(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestIsLoopbackHost(t *testing.T) {
-	for _, h := range []string{"localhost", "127.0.0.1", "::1", "[::1]", "127.5.5.5"} {
-		if !isLoopbackHost(h) {
-			t.Errorf("%q should be loopback", h)
-		}
-	}
-	for _, h := range []string{"169.254.169.254", "evil.example", "8.8.8.8", "givmo.io"} {
-		if isLoopbackHost(h) {
-			t.Errorf("%q should NOT be loopback", h)
-		}
+	// A host spelled outside ASCII is shown escaped, so a look-alike can't hide in
+	// the refusal.
+	err := validateAuthServerURL("https://ｍｃｐ.givmo.io/connect/oauth/token", false)
+	if msg := output.AsError(err).Message; !strings.Contains(msg, `\uff4d\uff43\uff50.givmo.io`) {
+		t.Errorf("refusal %q does not show the host escaped", msg)
 	}
 }
 

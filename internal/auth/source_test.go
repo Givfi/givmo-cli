@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -589,6 +590,105 @@ func TestTokenSource_SaysWhenTheSignInEnds(t *testing.T) {
 			}
 			if strings.Count(notices.String(), "\n") > 1 {
 				t.Errorf("the reminder was printed more than once")
+			}
+		})
+	}
+}
+
+// answeringTransport answers every request itself, as a token endpoint renewing
+// a sign-in would, and records where each was going, so a test can say whether
+// any request left at all.
+type answeringTransport struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (a *answeringTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	a.mu.Lock()
+	a.sent = append(a.sent, r.URL.String())
+	a.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"access_token":"test-access-1","token_type":"Bearer","refresh_token":"test-refresh-1","expires_in":1800}`)),
+		Request:    r,
+	}, nil
+}
+
+func (a *answeringTransport) requests() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.sent...)
+}
+
+// TestTokenSource_RefusesAStoredSignInTheRulesRefuse: each time a sign-in is
+// loaded, the addresses its login adopted are checked again with the rules a
+// login applies (CheckAddress). A sign-in that fails them is not used: no access
+// token is handed out, and no request leaves for any of its addresses, its
+// refresh token least of all. It stays stored, so a re-login or a logout can say
+// it was not ended on Givmo's side. Each sign-in here is due for renewal, so one
+// that is used is renewed through its token endpoint at once.
+func TestTokenSource_RefusesAStoredSignInTheRulesRefuse(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		profile   string
+		edit      func(c *Credential)
+		wantField string // the refused address; "" when the sign-in is used
+		wantErr   error
+	}{
+		{name: "an http token endpoint off this computer", profile: "sandbox",
+			edit:      func(c *Credential) { c.TokenEndpoint = "http://token.example.test/token" },
+			wantField: "token endpoint", wantErr: ErrNotHTTPS},
+		{name: "a loopback http token endpoint under the production profile", profile: "production",
+			edit:      func(c *Credential) { c.TokenEndpoint = "http://127.0.0.1:9/token" },
+			wantField: "token endpoint", wantErr: ErrNotHTTPS},
+		{name: "a revocation endpoint whose host isn't ASCII", profile: "sandbox",
+			edit:      func(c *Credential) { c.RevocationEndpoint = "https://ｍｃｐ.example.test/connect/oauth/revoke" },
+			wantField: "revocation endpoint", wantErr: ErrHostNotASCII},
+		{name: "an authorization server whose host is percent-encoded non-ASCII", profile: "sandbox",
+			edit:      func(c *Credential) { c.Issuer = "https://%EF%BD%8D%EF%BD%83%EF%BD%90.example.test" },
+			wantField: "authorization server", wantErr: ErrHostNotASCII},
+		{name: "an authorization server that isn't https", profile: "sandbox",
+			edit:      func(c *Credential) { c.Issuer = "http://mcp.example.test" },
+			wantField: "authorization server", wantErr: ErrNotHTTPS},
+		{name: "https throughout, under the production profile", profile: "production", edit: func(*Credential) {}},
+		{name: "a loopback http token endpoint on the sandbox profile", profile: "sandbox",
+			edit: func(c *Credential) { c.TokenEndpoint = "http://127.0.0.1:9/token" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newSourceStore(t)
+			c := signIn("https://mcp.example.test/connect/oauth/token", 10*time.Second, time.Hour)
+			c.Profile = tc.profile
+			tc.edit(c)
+			saveSignIn(t, store, c)
+			transport := &answeringTransport{}
+			src := NewTokenSource(store, tc.profile, &http.Client{Transport: transport}, nil)
+
+			got, err := src.Credential(context.Background())
+			if tc.wantField == "" {
+				if err != nil || got == nil || got.AccessToken != "test-access-1" {
+					t.Fatalf("Credential = %+v, %v; want the sign-in, renewed", got, err)
+				}
+				if sent := transport.requests(); len(sent) != 1 || sent[0] != c.TokenEndpoint {
+					t.Errorf("requests = %q, want one renewal at %s", sent, c.TokenEndpoint)
+				}
+				return
+			}
+			_, rejectedErr := src.Rejected(context.Background(), c.AuthorizationHeader())
+			for name, err := range map[string]error{"Credential": err, "Rejected": rejectedErr} {
+				var ae *StoredAddressError
+				if !errors.As(err, &ae) || ae.Field != tc.wantField || !errors.Is(err, tc.wantErr) {
+					t.Errorf("%s error = %v, want its %s refused (%v)", name, err, tc.wantField, tc.wantErr)
+				}
+			}
+			if got != nil {
+				t.Errorf("Credential handed out %+v", got)
+			}
+			if sent := transport.requests(); len(sent) != 0 {
+				t.Errorf("requests %q left; a sign-in the rules refuse sends nothing", sent)
+			}
+			if stored, err := store.Load(tc.profile); err != nil || stored.RefreshToken != "test-refresh-0" {
+				t.Errorf("stored sign-in = %+v, %v; want it kept as it was", stored, err)
 			}
 		})
 	}
