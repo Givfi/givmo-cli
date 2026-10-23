@@ -204,10 +204,40 @@ func (c *Credential) renewedBy(tr *TokenResponse) *Credential {
 	return &next
 }
 
-// Save stores c as the profile's sign-in under the profile's lock, so a login
-// never interleaves with another process's renewal of the sign-in it replaces.
-func (s *TokenSource) Save(ctx context.Context, c *Credential) error {
-	return s.withLock(ctx, func() error { return s.store.Save(c) })
+// Replace stores c as the profile's sign-in in place of the credential stored
+// there, then hands end the credential it replaced, if one was, so that sign-in
+// can be ended on the authorization server's side. Both run under the profile's
+// lock: a login never interleaves with another process's renewal of the sign-in
+// it replaces, and end gets that sign-in's latest refresh token. The new
+// credential is stored first, so a failed store ends nothing, and whatever end
+// does costs the new one nothing. A stored credential that cannot be read is
+// replaced without being handed to end.
+//
+// The Givmo authorization server ends a grant together with every live access
+// token the person holds for the same client, the new sign-in's among them. So
+// when a renewable sign-in replaces an OAuth one, its access token is stored as
+// due for renewal, and its first use renews it rather than presenting a token
+// the server may have ended.
+func (s *TokenSource) Replace(ctx context.Context, c *Credential, end func(previous *Credential)) error {
+	return s.withLock(ctx, func() error {
+		previous, err := s.store.Load(s.profile)
+		if err != nil {
+			previous = nil
+		}
+		next := c
+		if previous != nil && previous.Type == CredTypeOAuth && c.Renewable() {
+			due := *c
+			due.ExpiresAt = time.Now()
+			next = &due
+		}
+		if err := s.store.Save(next); err != nil {
+			return err
+		}
+		if previous != nil && end != nil {
+			end(previous)
+		}
+		return nil
+	})
 }
 
 // SignOut deletes everything stored for the profile under the profile's lock,

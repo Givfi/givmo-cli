@@ -235,6 +235,10 @@ names your own client metadata document.
 Givmo's side (RFC 7009). Where Givmo can't end it from the CLI yet, or can't be
 reached, logout says so: **Revoke access** in Connected Apps ends it there.
 
+`givmo login` on a profile that already holds a sign-in stores the new one, then
+asks Givmo to end the previous one, as `givmo logout` does, and says whether
+Givmo accepted. Where Givmo didn't, **Revoke access** in Connected Apps ends it.
+
 ## Development
 
 ```sh

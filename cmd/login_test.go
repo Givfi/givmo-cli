@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -373,6 +375,10 @@ func newFakeGivmo(t *testing.T, cimd bool) *fakeGivmo {
 		g.tokenRq = append(g.tokenRq, r.Clone(context.Background()))
 		g.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			io.WriteString(w, `{"access_token":"test-access-2","token_type":"Bearer","refresh_token":"test-refresh-2","expires_in":1800}`)
+			return
+		}
 		io.WriteString(w, `{"access_token":"test-access-1","token_type":"Bearer","refresh_token":"test-refresh-1","expires_in":1800,"scope":"givmo.donations.read givmo.receipts.read givmo.giving_summary.read givmo.donation_intents.create"}`)
 	})
 	g.srv = httptest.NewServer(mux)
@@ -384,6 +390,59 @@ func (g *fakeGivmo) tokenRequests() []*http.Request {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]*http.Request(nil), g.tokenRq...)
+}
+
+// signInThroughTheBrowser runs loginInteractive for app against g, playing the
+// browser: it takes the authorize URL from the login's stderr and sends the
+// authorization server's redirect to the CLI's listener. It returns the authorize
+// URL's query (nil when the login stopped before showing one), the stderr lines
+// it read, and the login's error.
+func signInThroughTheBrowser(t *testing.T, g *fakeGivmo, app *appCtx) (url.Values, []string, error) {
+	t.Helper()
+	stderrR, stderrW := io.Pipe()
+	app.Printer.Err = stderrW
+	prevNoBrowser, prevTimeout, prevPort := loginNoBrowser, loginTimeout, loginPort
+	loginNoBrowser, loginTimeout, loginPort = true, 5*time.Second, 0
+	defer func() { loginNoBrowser, loginTimeout, loginPort = prevNoBrowser, prevTimeout, prevPort }()
+
+	lines := make(chan string, 32)
+	go func() {
+		sc := bufio.NewScanner(stderrR)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		close(lines)
+	}()
+	done := make(chan error, 1)
+	go func() { done <- loginInteractive(context.Background(), app); stderrW.Close() }()
+
+	var seen []string
+	for {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				return nil, seen, <-done
+			}
+			seen = append(seen, line)
+			u, err := url.Parse(strings.TrimSpace(line))
+			if err != nil || u.Query().Get("redirect_uri") == "" {
+				continue
+			}
+			q := u.Query()
+			callback := q.Get("redirect_uri") + "?" + url.Values{"code": {"test-code"}, "state": {q.Get("state")}, "iss": {g.srv.URL}}.Encode()
+			resp, err := http.Get(callback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			for line := range lines {
+				seen = append(seen, line)
+			}
+			return q, seen, <-done
+		case <-time.After(5 * time.Second):
+			t.Fatal("no authorize URL on stderr")
+		}
+	}
 }
 
 // TestLoginInteractive_SignsInWithGivmosClientDocument runs the real login against
@@ -416,74 +475,41 @@ func TestLoginInteractive_SignsInWithGivmosClientDocument(t *testing.T) {
 			if err := store.SaveClientSecret(config.ProfileSandbox, "test-stored-secret"); err != nil {
 				t.Fatal(err)
 			}
-			stderrR, stderrW := io.Pipe()
 			app := &appCtx{
 				Profile: config.Profile{Name: config.ProfileSandbox, Endpoints: config.Endpoints{APIBase: g.srv.URL, AuthBase: g.srv.URL}},
 				Config:  &config.Config{},
-				Printer: output.NewPrinter(io.Discard, stderrW, false),
+				Printer: output.NewPrinter(io.Discard, io.Discard, false),
 				Store:   store,
 			}
-			prevNoBrowser, prevTimeout, prevPort := loginNoBrowser, loginTimeout, loginPort
-			loginNoBrowser, loginTimeout, loginPort = true, 5*time.Second, 0
-			defer func() { loginNoBrowser, loginTimeout, loginPort = prevNoBrowser, prevTimeout, prevPort }()
-
-			lines := make(chan string, 32)
-			go func() {
-				sc := bufio.NewScanner(stderrR)
-				for sc.Scan() {
-					lines <- sc.Text()
-				}
-				close(lines)
-			}()
-			done := make(chan error, 1)
-			go func() { done <- loginInteractive(context.Background(), app); stderrW.Close() }()
+			q, lines, err := signInThroughTheBrowser(t, g, app)
 
 			if !tc.cimd {
-				err := <-done
 				if oe := output.AsError(err); err == nil || oe.Code != output.ExitNetwork ||
 					oe.Message != "This Givmo environment doesn't accept the CLI's sign-in yet." {
 					t.Fatalf("login = %v, want exit 6 saying the environment doesn't accept the sign-in", err)
 				}
-				for line := range lines {
+				for _, line := range lines {
 					if strings.Contains(line, "authorize") || strings.Contains(line, "http") {
 						t.Errorf("stderr showed %q; nothing may be shown before the refusal", line)
 					}
+				}
+				if q != nil {
+					t.Errorf("an authorize URL was shown: %v", q)
 				}
 				if n := len(g.tokenRequests()); n != 0 {
 					t.Errorf("%d token requests, want none", n)
 				}
 				return
 			}
-
-			// Play the browser: take the authorize URL from stderr and send the
-			// authorization server's redirect to the CLI's listener.
-			var authorize *url.URL
-			for authorize == nil {
-				select {
-				case line, ok := <-lines:
-					if !ok {
-						t.Fatalf("stderr closed without an authorize URL; login = %v", <-done)
-					}
-					if u, err := url.Parse(strings.TrimSpace(line)); err == nil && u.Query().Get("redirect_uri") != "" {
-						authorize = u
-					}
-				case <-time.After(5 * time.Second):
-					t.Fatal("no authorize URL on stderr")
-				}
+			if err != nil {
+				t.Fatalf("login: %v", err)
 			}
-			q := authorize.Query()
+			if q == nil {
+				t.Fatalf("stderr showed no authorize URL: %q", lines)
+			}
 			wantClient := g.srv.URL + "/connect/oauth/clients/givmo-cli"
 			if got := q.Get("client_id"); got != wantClient {
 				t.Errorf("authorize client_id = %q, want Givmo's document %q", got, wantClient)
-			}
-			callback := q.Get("redirect_uri") + "?" + url.Values{"code": {"test-code"}, "state": {q.Get("state")}, "iss": {g.srv.URL}}.Encode()
-			resp, err := http.Get(callback)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			if err := <-done; err != nil {
-				t.Fatalf("login: %v", err)
 			}
 
 			reqs := g.tokenRequests()
@@ -529,6 +555,220 @@ func TestLoginInteractive_SignsInWithGivmosClientDocument(t *testing.T) {
 			granted, err := time.Parse(time.RFC3339Nano, fmt.Sprint(stored["granted_at"]))
 			if err != nil || time.Since(granted) > time.Minute {
 				t.Errorf("stored granted_at = %v (%v), want the consent time", stored["granted_at"], err)
+			}
+		})
+	}
+}
+
+// TestLoginInteractive_EndsThePreviousSignIn: a login on a profile that already
+// holds a sign-in stores the new one first, then asks Givmo to end the previous
+// one as logout does (its refresh token, RFC 7009), and says what Givmo answered.
+// The new sign-in is kept whatever the answer, and the login succeeds. Givmo ends
+// a grant together with every live access token the person holds for the
+// client, the new sign-in's among them, so after replacing a sign-in the new
+// access token is renewed before its first use. A login with an API key replaces
+// a sign-in the same way.
+func TestLoginInteractive_EndsThePreviousSignIn(t *testing.T) {
+	previousSignIn := func(revocation string) *auth.Credential {
+		return &auth.Credential{
+			Profile: config.ProfileSandbox, Type: auth.CredTypeOAuth, AccessToken: "test-access-old",
+			RefreshToken: "test-refresh-old", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
+			ClientID: "https://mcp.example.test/connect/oauth/clients/givmo-cli", Issuer: "https://mcp.example.test",
+			TokenEndpoint: "https://mcp.example.test/connect/oauth/token", RevocationEndpoint: revocation,
+			AuthMethod: auth.AuthMethodNone, GrantedAt: time.Now().Add(-24 * time.Hour),
+		}
+	}
+	const notOffered = "this Givmo environment doesn't let the CLI end its sign-in yet"
+	for _, tc := range []struct {
+		name string
+		// previous is the credential stored before the login, given the
+		// revocation server's endpoint and a closed one; nil stores none.
+		previous     func(revoke, closed string) *auth.Credential
+		status       int
+		body         string
+		apiKey       bool // log in with an API key instead of the browser
+		human        bool // read the text instead of the JSON
+		wantRevokes  int
+		wantRevoked  bool
+		wantError    string // previous_sign_in's revoke_error, a prefix; "" with wantRevoked
+		noPrevious   bool   // previous_sign_in absent
+		wantLine     string // the text's last line
+		wantRenewed  bool   // the first use after the login renews the new sign-in
+		wantInUseNow string // the access token that first use presents
+	}{
+		{name: "nothing stored", noPrevious: true, wantInUseNow: "test-access-1"},
+		{name: "a previous sign-in Givmo ends",
+			previous: func(revoke, _ string) *auth.Credential { return previousSignIn(revoke) },
+			status:   http.StatusOK, body: `{}`, wantRevokes: 1, wantRevoked: true,
+			wantRenewed: true, wantInUseNow: "test-access-2"},
+		{name: "a previous sign-in Givmo ends, in text", human: true,
+			previous: func(revoke, _ string) *auth.Credential { return previousSignIn(revoke) },
+			status:   http.StatusOK, body: `{}`, wantRevokes: 1,
+			wantLine:    "Asked Givmo to end the previous sign-in; it accepted.",
+			wantRenewed: true, wantInUseNow: "test-access-2"},
+		{name: "Givmo refuses to end it",
+			previous: func(revoke, _ string) *auth.Credential { return previousSignIn(revoke) },
+			status:   http.StatusUnauthorized, body: `{"error":"invalid_client"}`, wantRevokes: 1,
+			wantError: notOffered, wantRenewed: true, wantInUseNow: "test-access-2"},
+		{name: "Givmo refuses to end it, in text", human: true,
+			previous: func(revoke, _ string) *auth.Credential { return previousSignIn(revoke) },
+			status:   http.StatusUnauthorized, body: `{"error":"invalid_client"}`, wantRevokes: 1,
+			wantLine:    "The previous sign-in is not ended on Givmo's side: " + notOffered + ". To end it there, use Revoke access in Connected Apps.",
+			wantRenewed: true, wantInUseNow: "test-access-2"},
+		{name: "Givmo can't be reached",
+			previous:  func(_, closed string) *auth.Credential { return previousSignIn(closed) },
+			wantError: "Givmo could not be reached (", wantRenewed: true, wantInUseNow: "test-access-2"},
+		{name: "a previous sign-in an earlier givmo saved",
+			previous: func(string, string) *auth.Credential {
+				c := previousSignIn("")
+				c.ClientID, c.TokenEndpoint, c.AuthMethod = "", "", ""
+				return c
+			},
+			wantError:   "an earlier version of givmo saved it without what's needed to end it from here",
+			wantRenewed: true, wantInUseNow: "test-access-2"},
+		{name: "a previous sign-in carrying an address the rules refuse",
+			previous:    func(string, string) *auth.Credential { return previousSignIn("http://revoke.example.test/revoke") },
+			wantError:   `its revocation endpoint, "http://revoke.example.test/revoke", isn't https, so the CLI doesn't use it`,
+			wantRenewed: true, wantInUseNow: "test-access-2"},
+		{name: "a previous API key",
+			previous: func(string, string) *auth.Credential {
+				return &auth.Credential{Profile: config.ProfileSandbox, Type: auth.CredTypeAPIKey, AccessToken: "test-api-key-old", TokenType: "Bearer"}
+			},
+			noPrevious: true, wantInUseNow: "test-access-1"},
+		{name: "an API-key login replacing a sign-in", apiKey: true,
+			previous: func(revoke, _ string) *auth.Credential { return previousSignIn(revoke) },
+			status:   http.StatusOK, body: `{}`, wantRevokes: 1, wantRevoked: true, wantInUseNow: "test-api-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newFakeGivmo(t, true)
+			t.Setenv("GIVMO_HOME", t.TempDir())
+			t.Setenv("GIVMO_TOKEN_BACKEND", "file")
+			t.Setenv("GIVMO_CLIENT_ID", "")
+			t.Setenv("GIVMO_CLIENT_SECRET", "")
+			t.Setenv("GIVMO_API_KEY", "")
+			store, err := auth.NewStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// The revocation endpoint records each request, and which access token
+			// the store held when it arrived.
+			type revocation struct {
+				form          url.Values
+				authorization string
+				stored        string
+			}
+			var mu sync.Mutex
+			var revokes []revocation
+			revSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				held := ""
+				if c, err := store.Load(config.ProfileSandbox); err == nil {
+					held = c.AccessToken
+				}
+				mu.Lock()
+				revokes = append(revokes, revocation{form: r.PostForm, authorization: r.Header.Get("Authorization"), stored: held})
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			}))
+			defer revSrv.Close()
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := "http://" + ln.Addr().String() + "/revoke"
+			ln.Close()
+			var previous *auth.Credential
+			if tc.previous != nil {
+				previous = tc.previous(revSrv.URL+"/revoke", closed)
+				if err := store.Save(previous); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var out bytes.Buffer
+			app := &appCtx{
+				Profile: config.Profile{Name: config.ProfileSandbox, Endpoints: config.Endpoints{APIBase: g.srv.URL, AuthBase: g.srv.URL}},
+				Config:  &config.Config{},
+				Printer: output.NewPrinter(&out, io.Discard, !tc.human),
+				Store:   store,
+			}
+			newAccess := "test-access-1"
+			if tc.apiKey {
+				newAccess = "test-api-key"
+				err = loginWithAPIKey(app, newAccess)
+			} else {
+				_, _, err = signInThroughTheBrowser(t, g, app)
+			}
+			if err != nil {
+				t.Fatalf("login = %v; the new sign-in must not depend on ending the previous one", err)
+			}
+
+			mu.Lock()
+			got := append([]revocation(nil), revokes...)
+			mu.Unlock()
+			if len(got) != tc.wantRevokes {
+				t.Fatalf("%d revocation requests, want %d", len(got), tc.wantRevokes)
+			}
+			for _, rv := range got {
+				want := url.Values{"token": {"test-refresh-old"}, "token_type_hint": {"refresh_token"}, "client_id": {previous.ClientID}}
+				if rv.form.Encode() != want.Encode() {
+					t.Errorf("revocation form = %s, want the previous sign-in's refresh token: %s", rv.form.Encode(), want.Encode())
+				}
+				if rv.authorization != "" {
+					t.Errorf("a public client's revocation sent Authorization %q", rv.authorization)
+				}
+				if rv.stored != newAccess {
+					t.Errorf("when the revocation arrived the store held %q, want the new credential, stored first", rv.stored)
+				}
+			}
+
+			if tc.human {
+				if text := strings.TrimRight(out.String(), "\n"); !strings.HasSuffix(text, "\n"+tc.wantLine) {
+					t.Errorf("login said %q, want it to end %q", text, tc.wantLine)
+				}
+			} else {
+				var view map[string]any
+				if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+					t.Fatalf("login --json %q: %v", out.String(), err)
+				}
+				prev, has := view["previous_sign_in"].(map[string]any)
+				switch {
+				case tc.noPrevious:
+					if _, present := view["previous_sign_in"]; present {
+						t.Errorf("previous_sign_in = %v, want none", view["previous_sign_in"])
+					}
+				case !has:
+					t.Errorf("login --json = %v, want previous_sign_in", view)
+				default:
+					reason, _ := prev["revoke_error"].(string)
+					if prev["revoked"] != tc.wantRevoked || !strings.HasPrefix(reason, tc.wantError) || (tc.wantRevoked && reason != "") {
+						t.Errorf("previous_sign_in = %v, want revoked %v and revoke_error %q", prev, tc.wantRevoked, tc.wantError)
+					}
+				}
+			}
+
+			stored, err := store.Load(config.ProfileSandbox)
+			if err != nil || stored.AccessToken != newAccess {
+				t.Fatalf("stored = %+v, %v; want the new credential", stored, err)
+			}
+			if !tc.wantRenewed && stored.Expired() {
+				t.Errorf("the new credential was stored expired; only a sign-in that replaced another is stored due")
+			}
+			inUse, err := app.credential(context.Background())
+			if err != nil {
+				t.Fatalf("the first use after the login: %v", err)
+			}
+			refreshes := 0
+			for _, rq := range g.tokenRequests() {
+				if rq.PostForm.Get("grant_type") == "refresh_token" {
+					refreshes++
+				}
+			}
+			if wantRefreshes := map[bool]int{true: 1}[tc.wantRenewed]; refreshes != wantRefreshes || inUse.AccessToken != tc.wantInUseNow {
+				t.Errorf("the first use presents %q after %d renewals, want %q after %d", inUse.AccessToken, refreshes, tc.wantInUseNow, wantRefreshes)
 			}
 		})
 	}

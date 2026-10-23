@@ -92,15 +92,52 @@ func loginWithAPIKey(app *appCtx, key string) error {
 	}
 	ctx, cancel := baseContext()
 	defer cancel()
-	if err := app.tokens().Save(ctx, cred); err != nil {
+	previous, err := replaceSignIn(ctx, app, cred)
+	if err != nil {
 		return output.New(output.ExitGeneric, "could not store API key: "+err.Error(), "")
 	}
-	return app.Printer.Result(
-		map[string]any{"profile": app.Profile.Name, "type": auth.CredTypeAPIKey, "backend": app.Store.Backend()},
-		func(w io.Writer) {
-			fmt.Fprintf(w, "Stored API key for profile %q (backend: %s).\n", app.Profile.Name, app.Store.Backend())
-		},
-	)
+	view := map[string]any{"profile": app.Profile.Name, "type": auth.CredTypeAPIKey, "backend": app.Store.Backend()}
+	previous.addPrevious(view)
+	return app.Printer.Result(view, func(w io.Writer) {
+		fmt.Fprintf(w, "Stored API key for profile %q (backend: %s).\n", app.Profile.Name, app.Store.Backend())
+		previous.sayPrevious(w)
+	})
+}
+
+// replaceSignIn stores cred as the profile's credential and then asks Givmo to
+// end the sign-in it replaced, as logout does (endOnGivmo), returning what Givmo
+// said. That request gets its own time (revokeTimeout), whatever the wait for the
+// browser left of the login's.
+func replaceSignIn(ctx context.Context, app *appCtx, cred *auth.Credential) (givmoSide, error) {
+	var previous givmoSide
+	err := app.tokens().Replace(ctx, cred, func(old *auth.Credential) {
+		previous = endOnGivmo(context.WithoutCancel(ctx), app, old)
+	})
+	return previous, err
+}
+
+// addPrevious adds what Givmo said about the sign-in a login replaced to the
+// login's --json view, as previous_sign_in, when there was one to end.
+func (g givmoSide) addPrevious(view map[string]any) {
+	if !g.asked {
+		return
+	}
+	previous := map[string]any{"revoked": g.revoked}
+	if !g.revoked {
+		previous["revoke_error"] = g.reason
+	}
+	view["previous_sign_in"] = previous
+}
+
+// sayPrevious is the same in the login's text.
+func (g givmoSide) sayPrevious(w io.Writer) {
+	switch {
+	case !g.asked:
+	case g.revoked:
+		fmt.Fprintln(w, "Asked Givmo to end the previous sign-in; it accepted.")
+	default:
+		fmt.Fprintf(w, "The previous sign-in is not ended on Givmo's side: %s. To end it there, use Revoke access in Connected Apps.\n", g.reason)
+	}
 }
 
 // loginInteractive runs the PKCE loopback flow.
@@ -228,7 +265,8 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 		}
 	}
 
-	// 8) Persist the credential, with what renewing and ending it need.
+	// 8) Persist the credential, with what renewing and ending it need, in place
+	//    of the profile's stored one, then end that one on Givmo's side.
 	cred := auth.CredentialFromToken(app.Profile.Name, tok)
 	cred.ClientID = client.id
 	cred.Issuer = asMeta.Issuer
@@ -236,23 +274,24 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	cred.RevocationEndpoint = asMeta.RevocationEndpoint
 	cred.AuthMethod = client.authMethod
 	cred.GrantedAt = time.Now()
-	if err := app.tokens().Save(ctx, cred); err != nil {
+	previous, err := replaceSignIn(ctx, app, cred)
+	if err != nil {
 		return output.New(output.ExitGeneric, "authenticated, but could not store the token: "+err.Error(), "")
 	}
 
-	return app.Printer.Result(
-		map[string]any{
-			"profile": app.Profile.Name,
-			"type":    auth.CredTypeOAuth,
-			"scopes":  cred.Scopes,
-			"backend": app.Store.Backend(),
-		},
-		func(w io.Writer) {
-			fmt.Fprintf(w, "Logged in to profile %q.\n", app.Profile.Name)
-			fmt.Fprintf(w, "  scopes:  %s\n", strings.Join(cred.Scopes, " "))
-			fmt.Fprintf(w, "  storage: %s\n", app.Store.Backend())
-		},
-	)
+	view := map[string]any{
+		"profile": app.Profile.Name,
+		"type":    auth.CredTypeOAuth,
+		"scopes":  cred.Scopes,
+		"backend": app.Store.Backend(),
+	}
+	previous.addPrevious(view)
+	return app.Printer.Result(view, func(w io.Writer) {
+		fmt.Fprintf(w, "Logged in to profile %q.\n", app.Profile.Name)
+		fmt.Fprintf(w, "  scopes:  %s\n", strings.Join(cred.Scopes, " "))
+		fmt.Fprintf(w, "  storage: %s\n", app.Store.Backend())
+		previous.sayPrevious(w)
+	})
 }
 
 // discoverAuthServer resolves the AS metadata for resource, the identifier the
