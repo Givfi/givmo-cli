@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/givfi/givmo-cli/internal/config"
 )
 
 // RenewWindow is how close to its expiry an access token is renewed before it is
@@ -39,6 +41,11 @@ var (
 	// ErrLockWaitCanceled: the caller cancelled while another givmo process held
 	// the profile's lock.
 	ErrLockWaitCanceled = errors.New("stopped waiting for another givmo process to finish renewing the sign-in")
+	// ErrCannotRenewHere: a login left the sign-in it replaced live, since this
+	// computer can't renew the new one (no file lock here, or no refresh token)
+	// and ending the previous one would end the new one's access token too
+	// (Replace).
+	ErrCannotRenewHere = errors.New("this computer can't renew the new sign-in, so ending the previous one would end the new one too")
 )
 
 // TokenSource gives every command and the MCP bridge the active profile's
@@ -70,13 +77,18 @@ func NewTokenSource(store *Store, profile string, client *http.Client, notices i
 // Credential returns the stored credential, renewed first when its access token
 // expires within RenewWindow. It returns (nil, nil) when nothing is stored. A
 // credential that cannot be renewed (an API key, or a sign-in saved by an earlier
-// givmo) is returned as stored.
+// givmo) is returned as stored. A sign-in carrying an address CheckAddress
+// refuses is not returned: a *StoredAddressError says which, and the sign-in
+// stays stored.
 func (s *TokenSource) Credential(ctx context.Context) (*Credential, error) {
 	c, err := s.store.Load(s.profile)
 	if errors.Is(err, ErrNoCredential) {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := c.CheckAddresses(s.allowLoopback()); err != nil {
 		return nil, err
 	}
 	if c.Renewable() && c.expiresWithin(RenewWindow) {
@@ -111,8 +123,11 @@ func (s *TokenSource) renew(ctx context.Context, seen string, force bool) (*Cred
 		if err != nil {
 			return err
 		}
+		if err := c.CheckAddresses(s.allowLoopback()); err != nil {
+			return err
+		}
 		due := c.expiresWithin(RenewWindow) || (force && c.AuthorizationHeader() == seen)
-		if !due || !c.Renewable() || !fileLocking {
+		if !due || !c.renewsHere() {
 			out = c
 			return nil
 		}
@@ -194,10 +209,56 @@ func (c *Credential) renewedBy(tr *TokenResponse) *Credential {
 	return &next
 }
 
-// Save stores c as the profile's sign-in under the profile's lock, so a login
-// never interleaves with another process's renewal of the sign-in it replaces.
-func (s *TokenSource) Save(ctx context.Context, c *Credential) error {
-	return s.withLock(ctx, func() error { return s.store.Save(c) })
+// renewsHere reports whether this computer renews c: it carries what a renewal
+// needs, and the platform has the file lock that keeps renewals one at a time.
+func (c *Credential) renewsHere() bool {
+	return c.Renewable() && fileLocking
+}
+
+// Replace stores c as the profile's sign-in in place of the credential stored
+// there, then hands end the credential it replaced, if one was, so that sign-in
+// can be ended on the authorization server's side. Both run under the profile's
+// lock: a login never interleaves with another process's renewal of the sign-in
+// it replaces, and end gets that sign-in's latest refresh token. The new
+// credential is stored first, so a failed store ends nothing, and whatever end
+// does costs the new one nothing. A stored credential that cannot be read is
+// replaced without being handed to end.
+//
+// The Givmo authorization server ends a grant together with every live access
+// token the person holds for the same client, the new sign-in's among them. So
+// when a sign-in this computer renews replaces an OAuth one, its access token is
+// stored as due for renewal, and its first use renews it rather than presenting
+// a token the server may have ended. When c is an OAuth sign-in this computer
+// can't renew, ending the previous OAuth sign-in would leave c's access token
+// ended with nothing to replace it, so the previous one is left live: end gets
+// it with ErrCannotRenewHere as leftLive, and must not end it. Otherwise
+// leftLive is nil. An API key is none of the client's access tokens, so one
+// that replaces an OAuth sign-in still has it ended.
+func (s *TokenSource) Replace(ctx context.Context, c *Credential, end func(previous *Credential, leftLive error)) error {
+	return s.withLock(ctx, func() error {
+		previous, err := s.store.Load(s.profile)
+		if err != nil {
+			previous = nil
+		}
+		replacesSignIn := previous != nil && previous.Type == CredTypeOAuth
+		var leftLive error
+		next := c
+		switch {
+		case replacesSignIn && c.Type == CredTypeOAuth && !c.renewsHere():
+			leftLive = ErrCannotRenewHere
+		case replacesSignIn && c.renewsHere():
+			due := *c
+			due.ExpiresAt = time.Now()
+			next = &due
+		}
+		if err := s.store.Save(next); err != nil {
+			return err
+		}
+		if previous != nil && end != nil {
+			end(previous, leftLive)
+		}
+		return nil
+	})
 }
 
 // SignOut deletes everything stored for the profile under the profile's lock,
@@ -211,6 +272,12 @@ func (s *TokenSource) SignOut(ctx context.Context, end func(*Credential)) error 
 		}
 		return s.store.Delete(s.profile)
 	})
+}
+
+// allowLoopback says whether the profile's sign-ins may use http to a loopback
+// address (CheckAddress): never the production profile's.
+func (s *TokenSource) allowLoopback() bool {
+	return s.profile != config.ProfileProduction
 }
 
 // withLock runs fn holding the profile's lock, waiting at most lockWait for it. A

@@ -54,6 +54,9 @@ agent operator.
   Secrets are never printed. The four consumer scopes are exactly:
   `givmo.donations.read`, `givmo.receipts.read`, `givmo.giving_summary.read`,
   `givmo.donation_intents.create`.
+- Signing in again replaces the stored sign-in and asks Givmo to end the
+  previous one. `givmo login --json` reports it as `previous_sign_in`:
+  `revoked`, and `revoke_error` when Givmo didn't accept.
 
 ## Command map (agent cheat-sheet)
 

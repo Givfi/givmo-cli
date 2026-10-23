@@ -22,12 +22,19 @@ const keychainService = "io.givmo.cli"
 // OAuth client secret is never serialized into the Credential JSON blob.
 const clientSecretKeychainService = "io.givmo.cli.client-secret"
 
+// securityPath is macOS's keychain tool. The store runs it by this path alone,
+// never a `security` found on PATH: a directory the user can write, ahead of
+// /usr/bin on PATH, could otherwise hold a program of that name, and it would
+// receive every credential the store writes. Tests point it at a fake, since no
+// test may reach a real keychain.
+var securityPath = "/usr/bin/security"
+
 // ErrNoCredential means no credential is stored for the requested profile.
 var ErrNoCredential = errors.New("no stored credential for profile")
 
 // Store persists per-profile credentials and OAuth client secrets. It prefers
-// the OS keychain (macOS `security`) when available and falls back to separate
-// 0600 files under ~/.givmo. Secrets never touch logs or --json output.
+// the OS keychain (macOS's /usr/bin/security) when available and falls back to
+// separate 0600 files under ~/.givmo. Secrets never touch logs or --json output.
 type Store struct {
 	// useKeychain is set when the platform keychain backend is usable.
 	useKeychain bool
@@ -35,8 +42,8 @@ type Store struct {
 	fileDir string
 }
 
-// NewStore builds a Store, detecting keychain availability. On non-macOS or
-// when `security` is unavailable it uses the file backend.
+// NewStore builds a Store, detecting keychain availability. On non-macOS, or
+// without /usr/bin/security, it uses the file backend.
 func NewStore() (*Store, error) {
 	dir, err := config.Dir()
 	if err != nil {
@@ -51,13 +58,14 @@ func NewStore() (*Store, error) {
 	return s, nil
 }
 
-// keychainAvailable reports whether the macOS `security` CLI is usable.
+// keychainAvailable reports whether macOS's keychain tool is at securityPath, an
+// executable file. Nothing is run.
 func keychainAvailable() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	_, err := exec.LookPath("security")
-	return err == nil
+	info, err := os.Stat(securityPath)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 // Backend returns a short name for the active backend, for diagnostics.
@@ -236,7 +244,7 @@ func (s *Store) fileClientSecretDelete(profile string) error {
 	return err
 }
 
-// ---- macOS keychain backend (shells to `security`) --------------------------
+// ---- macOS keychain backend (runs /usr/bin/security) ------------------------
 
 func (s *Store) keychainSet(profile string, data []byte) error {
 	return s.keychainSetService(keychainService, profile, data)
@@ -261,7 +269,7 @@ func (s *Store) keychainSetService(service, profile string, data []byte) error {
 	if len(line) > keychainLineMax {
 		return errors.New("keychain store failed: the item is too large for the keychain")
 	}
-	cmd := exec.Command("security", "-i")
+	cmd := exec.Command(securityPath, "-i")
 	cmd.Stdin = strings.NewReader(line)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("keychain store failed (security: %v)", err)
@@ -288,7 +296,7 @@ func (s *Store) keychainGet(profile string) ([]byte, error) {
 }
 
 func (s *Store) keychainGetService(service, profile string) ([]byte, error) {
-	cmd := exec.Command("security", "find-generic-password",
+	cmd := exec.Command(securityPath, "find-generic-password",
 		"-a", profile,
 		"-s", service,
 		"-w",
@@ -302,7 +310,7 @@ func (s *Store) keychainGetService(service, profile string) ([]byte, error) {
 }
 
 func (s *Store) keychainDeleteService(service, profile string) error {
-	cmd := exec.Command("security", "delete-generic-password",
+	cmd := exec.Command(securityPath, "delete-generic-password",
 		"-a", profile,
 		"-s", service,
 	)

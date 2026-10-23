@@ -42,8 +42,9 @@ app for iPhone and for Android, and on Givmo's Connected Apps page on the web.
 **Revoke access** ends an app's access on Givmo's side at once.
 
 With this repository's `givmo` CLI, `givmo logout` deletes the sign-in on the
-computer and asks Givmo to end it on Givmo's side; where Givmo can't end it from
-the CLI yet, the CLI says so, and **Revoke access** in Connected Apps ends it.
+computer and asks Givmo to end it on Givmo's side, and signing in again does the
+same for the sign-in it replaces; where Givmo can't end it from the CLI yet, the
+CLI says so, and **Revoke access** in Connected Apps ends it.
 
 ## Money
 

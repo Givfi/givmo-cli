@@ -7,8 +7,9 @@ import (
 	"syscall"
 )
 
-// fileLocking is true: flock serializes the CLI's renewals here.
-const fileLocking = true
+// fileLocking is true: flock serializes the CLI's renewals here. It is a
+// variable so a test can stand in for a platform with no file lock.
+var fileLocking = true
 
 // lockFile takes an exclusive flock on f, waiting until it is free.
 func lockFile(f *os.File) error {

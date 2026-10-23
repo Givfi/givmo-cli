@@ -330,3 +330,46 @@ func TestLoopbackListener_ChecksIss(t *testing.T) {
 		})
 	}
 }
+
+// TestProtectedResourceMetadata_DescribesTheSameResourceOnly pins which
+// spellings of a resource a protected-resource document may use (RFC 9728
+// section 3.3): the ones the Givmo authorization server reads as the same
+// resource, but for the few it forgives that no one writes (Describes), and
+// never another scheme, host, port or path.
+func TestProtectedResourceMetadata_DescribesTheSameResourceOnly(t *testing.T) {
+	const resource = "https://mcp.givmo.io/mcp"
+	for _, tc := range []struct {
+		name, document, resource string // resource "" is the constant
+		want                     bool
+	}{
+		{name: "the same identifier", document: resource, want: true},
+		{name: "the scheme and the host in upper case", document: "HTTPS://MCP.Givmo.IO/mcp", want: true},
+		{name: "the default port written out", document: "https://mcp.givmo.io:443/mcp", want: true},
+		{name: "one trailing slash", document: "https://mcp.givmo.io/mcp/", want: true},
+		{name: "the login's own spelling in upper case", document: resource, resource: "https://MCP.givmo.io/mcp", want: true},
+		{name: "another scheme", document: "http://mcp.givmo.io/mcp"},
+		{name: "another host", document: "https://mcp-dev.givmo.io/mcp"},
+		{name: "another port", document: "https://mcp.givmo.io:8443/mcp"},
+		{name: "http's default port is not https's", document: "https://mcp.givmo.io:80/mcp"},
+		{name: "another path", document: "https://mcp.givmo.io/other/mcp"},
+		{name: "a path in another case", document: "https://mcp.givmo.io/MCP"},
+		{name: "the bare origin", document: "https://mcp.givmo.io"},
+		{name: "two trailing slashes", document: "https://mcp.givmo.io/mcp//"},
+		{name: "a query", document: "https://mcp.givmo.io/mcp?x=1"},
+		{name: "a fragment", document: "https://mcp.givmo.io/mcp#x"},
+		{name: "a user part", document: "https://someone@mcp.givmo.io/mcp"},
+		{name: "white space around it", document: " " + resource},
+		{name: "no resource at all", document: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := tc.resource
+			if want == "" {
+				want = resource
+			}
+			doc := &ProtectedResourceMetadata{Resource: tc.document}
+			if got := doc.Describes(want); got != tc.want {
+				t.Errorf("a document naming %q describes %s: %v, want %v", tc.document, want, got, tc.want)
+			}
+		})
+	}
+}

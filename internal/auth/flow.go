@@ -36,6 +36,58 @@ type ProtectedResourceMetadata struct {
 	ScopesSupported      []string `json:"scopes_supported,omitempty"`
 }
 
+// Describes reports whether the document is the one for resource. RFC 9728
+// section 3.3 requires that before anything in a document is used: its resource
+// must be identical to the identifier the document was fetched for.
+//
+// Identical is read as the Givmo authorization server reads a resource
+// parameter (resource_indicators._canonical), and exactly these spellings are
+// one:
+//   - the scheme, and the host, in upper or lower case;
+//   - the scheme's default port written out (:443 for https, :80 for http), and
+//     no port;
+//   - a path with one trailing slash, and the same path without it.
+//
+// Nothing else is one. Two different schemes, hosts, ports or paths never are,
+// so a document for any other resource never matches. An identifier with a
+// query, a fragment or a user part, or a scheme other than https or http,
+// identifies no resource and matches nothing.
+//
+// The server's reading also forgives a few spellings no one writes, which a
+// document's resource doesn't get here: white space around the identifier or a
+// tab or line break inside it, a default port written with leading zeros
+// (:0443), and an empty user part (@) or query (?). So for any identifier
+// written as a URI, the login never takes a resource the server wouldn't. A
+// character a URI can't carry as written (a space, a quote) is the exception:
+// Go's URL parser reads it as its percent-encoding (%20, %22), which the server
+// keeps apart from it. No Givmo resource's path has one.
+func (m *ProtectedResourceMetadata) Describes(resource string) bool {
+	a, ok := canonicalResource(m.Resource)
+	b, okToo := canonicalResource(resource)
+	return ok && okToo && a == b
+}
+
+// canonicalResource is a resource identifier spelled one way for Describes, or
+// false for one that identifies no resource.
+func canonicalResource(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Opaque != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", false
+	}
+	defaultPort := map[string]string{"https": "443", "http": "80"}[u.Scheme] // Parse lower-cases the scheme
+	host := strings.ToLower(u.Hostname())
+	if defaultPort == "" || host == "" {
+		return "", false
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" && port != defaultPort {
+		host += ":" + port
+	}
+	return u.Scheme + "://" + host + strings.TrimSuffix(u.EscapedPath(), "/"), true
+}
+
 // AuthServerMetadata is the RFC 8414 authorization-server metadata document.
 type AuthServerMetadata struct {
 	Issuer                            string   `json:"issuer"`
@@ -71,7 +123,9 @@ func (m *AuthServerMetadata) AcceptsClientDocuments() bool {
 // Discoverer fetches OAuth metadata. It is an interface so tests can inject a
 // fake without touching the network.
 type Discoverer interface {
-	ProtectedResource(ctx context.Context, apiBase string) (*ProtectedResourceMetadata, error)
+	// ProtectedResource fetches the RFC 9728 document of the resource whose
+	// identifier is resource.
+	ProtectedResource(ctx context.Context, resource string) (*ProtectedResourceMetadata, error)
 	AuthServer(ctx context.Context, authBase string) (*AuthServerMetadata, error)
 }
 
@@ -83,8 +137,16 @@ func NewDiscoverer() Discoverer {
 	return &httpDiscoverer{client: &http.Client{Timeout: 15 * time.Second}}
 }
 
-func (d *httpDiscoverer) ProtectedResource(ctx context.Context, apiBase string) (*ProtectedResourceMetadata, error) {
-	u := strings.TrimRight(apiBase, "/") + "/.well-known/oauth-protected-resource"
+// ProtectedResource reads resource's document from where RFC 9728 section 3.1
+// puts it: /.well-known/oauth-protected-resource inserted between the
+// identifier's host and its path, so <issuer>/mcp's document is
+// <issuer>/.well-known/oauth-protected-resource/mcp.
+func (d *httpDiscoverer) ProtectedResource(ctx context.Context, resource string) (*ProtectedResourceMetadata, error) {
+	r, err := url.Parse(resource)
+	if err != nil || r.Host == "" {
+		return nil, fmt.Errorf("resource %q is not a URL with a host", resource)
+	}
+	u := r.Scheme + "://" + r.Host + "/.well-known/oauth-protected-resource" + strings.TrimSuffix(r.EscapedPath(), "/")
 	var m ProtectedResourceMetadata
 	if err := getJSON(ctx, d.client, u, &m); err != nil {
 		return nil, err

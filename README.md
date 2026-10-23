@@ -32,7 +32,7 @@ envelope.
 ## Install
 
 ```sh
-go install github.com/givfi/givmo-cli@latest
+go install github.com/givfi/givmo-cli/cmd/givmo@latest
 # or from a checkout:
 go build -o givmo . && mv givmo /usr/local/bin/
 ```
@@ -120,11 +120,12 @@ person's Givmo account, what it can never do, and how to report a security issue
   HTTPS-only guarantee holds across hops and an SSRF redirect to an
   internal/metadata address cannot be reached), time-bounded, and size-capped.
 - **No auth secret in logs or JSON.** Tokens are stored in the OS keychain when
-  available (macOS `security`, which receives them on its standard input, never
-  on a command line), else in `0600` files under `~/.givmo`. A registered
-  client's secret, used only with the `GIVMO_CLIENT_ID` override, is stored the
-  same way, apart from the tokens. They are **never** logged and **never** appear
-  in `--json` output; `whoami` shows scopes and the access token's expiry only.
+  available (macOS's `/usr/bin/security`, run by that path and never looked up
+  on `PATH`; it receives them on its standard input, never on a command line),
+  else in `0600` files under `~/.givmo`. A registered client's secret, used only
+  with the `GIVMO_CLIENT_ID` override, is stored the same way, apart from the
+  tokens. They are **never** logged and **never** appear in `--json` output;
+  `whoami` shows scopes and the access token's expiry only.
 - **Production guardrail.** The `production` profile prints a loud banner before
   any mutating operation.
 
@@ -206,7 +207,9 @@ client document for the profile's environment
 `https://mcp.givmo.io/connect/oauth/clients/givmo-cli`) and uses no client
 secret. It runs the authorization-code flow with PKCE S256, validates the
 callback's `state`, and, where the authorization server advertises it, checks
-that the callback's `iss` names that server (RFC 9207).
+that the callback's `iss` names that server (RFC 9207). It reads the
+protected-resource document of the resource it signs in to, `<api_base>/mcp`,
+and uses it only when the document names that resource (RFC 9728).
 
 `givmo login` binds a loopback listener on `127.0.0.1` using an OS-assigned
 ephemeral port by default (RFC 8252 loopback redirect). The redirect URI is
@@ -231,6 +234,10 @@ names your own client metadata document.
 `givmo logout` deletes the sign-in on this computer and asks Givmo to end it on
 Givmo's side (RFC 7009). Where Givmo can't end it from the CLI yet, or can't be
 reached, logout says so: **Revoke access** in Connected Apps ends it there.
+
+`givmo login` on a profile that already holds a sign-in stores the new one, then
+asks Givmo to end the previous one, as `givmo logout` does, and says whether
+Givmo accepted. Where Givmo didn't, **Revoke access** in Connected Apps ends it.
 
 ## Development
 

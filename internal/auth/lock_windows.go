@@ -16,8 +16,9 @@ var (
 	procUnlockFileEx = kernel32.NewProc("UnlockFileEx")
 )
 
-// fileLocking is true: LockFileEx serializes the CLI's renewals here.
-const fileLocking = true
+// fileLocking is true: LockFileEx serializes the CLI's renewals here. It is a
+// variable so a test can stand in for a platform with no file lock.
+var fileLocking = true
 
 // lockfileExclusiveLock is LOCKFILE_EXCLUSIVE_LOCK.
 const lockfileExclusiveLock = 0x2

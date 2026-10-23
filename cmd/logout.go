@@ -84,13 +84,18 @@ func runLogout(ctx context.Context, app *appCtx) error {
 
 // endOnGivmo asks the authorization server to end cred's sign-in by revoking its
 // refresh token (RFC 7009), which ends the whole sign-in, its access tokens with
-// it. An API key has no sign-in to end here.
+// it. An API key has no sign-in to end here. A sign-in carrying an address the
+// CLI's rules refuse (auth.CheckAddress) is sent nowhere, its refresh token least
+// of all.
 func endOnGivmo(ctx context.Context, app *appCtx, cred *auth.Credential) givmoSide {
 	if cred.Type != auth.CredTypeOAuth {
 		return givmoSide{}
 	}
 	if cred.RefreshToken == "" || cred.ClientID == "" || cred.RevocationEndpoint == "" {
 		return givmoSide{asked: true, reason: "an earlier version of givmo saved it without what's needed to end it from here"}
+	}
+	if err := cred.CheckAddresses(!app.Profile.IsProduction()); err != nil {
+		return givmoSide{asked: true, reason: err.Error() + ", so the CLI doesn't use it"}
 	}
 	var secret string
 	if cred.AuthMethod == auth.AuthMethodClientSecretBasic {

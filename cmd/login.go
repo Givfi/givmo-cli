@@ -5,9 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,15 +92,58 @@ func loginWithAPIKey(app *appCtx, key string) error {
 	}
 	ctx, cancel := baseContext()
 	defer cancel()
-	if err := app.tokens().Save(ctx, cred); err != nil {
+	previous, err := replaceSignIn(ctx, app, cred)
+	if err != nil {
 		return output.New(output.ExitGeneric, "could not store API key: "+err.Error(), "")
 	}
-	return app.Printer.Result(
-		map[string]any{"profile": app.Profile.Name, "type": auth.CredTypeAPIKey, "backend": app.Store.Backend()},
-		func(w io.Writer) {
-			fmt.Fprintf(w, "Stored API key for profile %q (backend: %s).\n", app.Profile.Name, app.Store.Backend())
-		},
-	)
+	view := map[string]any{"profile": app.Profile.Name, "type": auth.CredTypeAPIKey, "backend": app.Store.Backend()}
+	previous.addPrevious(view)
+	return app.Printer.Result(view, func(w io.Writer) {
+		fmt.Fprintf(w, "Stored API key for profile %q (backend: %s).\n", app.Profile.Name, app.Store.Backend())
+		previous.sayPrevious(w)
+	})
+}
+
+// replaceSignIn stores cred as the profile's credential and then asks Givmo to
+// end the sign-in it replaced, as logout does (endOnGivmo), returning what Givmo
+// said. That request gets its own time (revokeTimeout), whatever the wait for the
+// browser left of the login's. Where this computer can't renew cred, the sign-in
+// it replaced is left live, and the reason is returned instead
+// (auth.ErrCannotRenewHere).
+func replaceSignIn(ctx context.Context, app *appCtx, cred *auth.Credential) (givmoSide, error) {
+	var previous givmoSide
+	err := app.tokens().Replace(ctx, cred, func(old *auth.Credential, leftLive error) {
+		if leftLive != nil {
+			previous = givmoSide{asked: true, reason: leftLive.Error()}
+			return
+		}
+		previous = endOnGivmo(context.WithoutCancel(ctx), app, old)
+	})
+	return previous, err
+}
+
+// addPrevious adds what Givmo said about the sign-in a login replaced to the
+// login's --json view, as previous_sign_in, when there was one to end.
+func (g givmoSide) addPrevious(view map[string]any) {
+	if !g.asked {
+		return
+	}
+	previous := map[string]any{"revoked": g.revoked}
+	if !g.revoked {
+		previous["revoke_error"] = g.reason
+	}
+	view["previous_sign_in"] = previous
+}
+
+// sayPrevious is the same in the login's text.
+func (g givmoSide) sayPrevious(w io.Writer) {
+	switch {
+	case !g.asked:
+	case g.revoked:
+		fmt.Fprintln(w, "Asked Givmo to end the previous sign-in; it accepted.")
+	default:
+		fmt.Fprintf(w, "The previous sign-in is not ended on Givmo's side: %s. To end it there, use Revoke access in Connected Apps.\n", g.reason)
+	}
 }
 
 // loginInteractive runs the PKCE loopback flow.
@@ -129,18 +171,21 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 
 	app.prodBanner("logging in")
 
-	// 1) Discover the authorization server via the MCP host's protected-resource
+	// 1) Discover the authorization server via the resource's protected-resource
 	//    metadata, then the AS metadata. A client metadata document needs the
 	//    metadata (it says whether the server accepts one); only a registered
 	//    client falls back to the profile's configured auth base with the
 	//    conventional Connect paths when discovery fails.
 	disc := auth.NewDiscoverer()
 	authBase := app.Profile.Endpoints.AuthBase
-	resource := app.Profile.Endpoints.APIBase + "/mcp"
+	// The resource the login is for, the profile's MCP endpoint: the identifier its
+	// protected-resource document must name, and the one the authorize request and
+	// the exchange carry (RFC 8707).
+	resource := strings.TrimRight(app.Profile.Endpoints.APIBase, "/") + "/mcp"
 
 	// allowLoopback: a discovered http://127.0.0.1|localhost AS is tolerated only
 	// off production (sandbox/dev), never in production.
-	asMeta, err := discoverAuthServer(ctx, disc, app.Profile.Endpoints.APIBase, authBase, !app.Profile.IsProduction(), !env.registered())
+	asMeta, err := discoverAuthServer(ctx, disc, resource, authBase, !app.Profile.IsProduction(), !env.registered())
 	if err != nil {
 		return err
 	}
@@ -226,7 +271,8 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 		}
 	}
 
-	// 8) Persist the credential, with what renewing and ending it need.
+	// 8) Persist the credential, with what renewing and ending it need, in place
+	//    of the profile's stored one, then end that one on Givmo's side.
 	cred := auth.CredentialFromToken(app.Profile.Name, tok)
 	cred.ClientID = client.id
 	cred.Issuer = asMeta.Issuer
@@ -234,47 +280,63 @@ func loginInteractive(parent context.Context, app *appCtx) error {
 	cred.RevocationEndpoint = asMeta.RevocationEndpoint
 	cred.AuthMethod = client.authMethod
 	cred.GrantedAt = time.Now()
-	if err := app.tokens().Save(ctx, cred); err != nil {
+	previous, err := replaceSignIn(ctx, app, cred)
+	if err != nil {
 		return output.New(output.ExitGeneric, "authenticated, but could not store the token: "+err.Error(), "")
 	}
 
-	return app.Printer.Result(
-		map[string]any{
-			"profile": app.Profile.Name,
-			"type":    auth.CredTypeOAuth,
-			"scopes":  cred.Scopes,
-			"backend": app.Store.Backend(),
-		},
-		func(w io.Writer) {
-			fmt.Fprintf(w, "Logged in to profile %q.\n", app.Profile.Name)
-			fmt.Fprintf(w, "  scopes:  %s\n", strings.Join(cred.Scopes, " "))
-			fmt.Fprintf(w, "  storage: %s\n", app.Store.Backend())
-		},
-	)
+	view := map[string]any{
+		"profile": app.Profile.Name,
+		"type":    auth.CredTypeOAuth,
+		"scopes":  cred.Scopes,
+		"backend": app.Store.Backend(),
+	}
+	previous.addPrevious(view)
+	return app.Printer.Result(view, func(w io.Writer) {
+		fmt.Fprintf(w, "Logged in to profile %q.\n", app.Profile.Name)
+		fmt.Fprintf(w, "  scopes:  %s\n", strings.Join(cred.Scopes, " "))
+		fmt.Fprintf(w, "  storage: %s\n", app.Store.Backend())
+		previous.sayPrevious(w)
+	})
 }
 
-// discoverAuthServer resolves the AS metadata. With requireMetadata unset (a
-// registered client) it falls back to the conventional Connect endpoints when
-// discovery is impossible (metadata unreachable); with it set (a client metadata
-// document, which only the metadata says the server accepts) it stops instead,
-// exit 6.
+// discoverAuthServer resolves the AS metadata for resource, the identifier the
+// login asks for. With requireMetadata unset (a registered client) it falls back
+// to the conventional Connect endpoints when discovery is impossible (metadata
+// unreachable); with it set (a client metadata document, which only the metadata
+// says the server accepts) it stops instead, exit 6.
+//
+// The protected-resource document is the resource's own (RFC 9728 section 3.1),
+// and a document that names another resource is not used at all (section 3.3):
+// the login stops there, exit 7, before any metadata is read or browser opened.
 //
 // DEFENSE-IN-DEPTH: a discovered authorization_servers[0] / authorize / token /
-// revocation endpoint is otherwise adopted verbatim. We reject any non-https
-// discovered AS URL so a compromised or spoofed protected-resource document
-// cannot point the login flow (and the PKCE code) at a plaintext or
-// attacker-controlled origin. A loopback http URL (127.0.0.1 / localhost / ::1)
-// is permitted ONLY when allowLoopback is true (sandbox/dev profiles), never in
-// production. And a metadata document must name, as its issuer, the base it was
+// revocation endpoint is otherwise adopted verbatim. Every address the login
+// adopts passes auth.CheckAddress before it is used: https with an ASCII host, so
+// a compromised or spoofed protected-resource document cannot point the login
+// flow (and the PKCE code) at a plaintext, attacker-controlled or look-alike
+// origin. A loopback http URL (127.0.0.1 / localhost / ::1) is permitted ONLY
+// when allowLoopback is true (sandbox/dev profiles), never in production. The
+// authorization server's own address is checked before its metadata is read,
+// whichever way it was found, since a sign-in stores it and every load checks it
+// again. And a metadata document must name, as its issuer, the base it was
 // fetched from (RFC 8414 section 3.3).
-func discoverAuthServer(ctx context.Context, disc auth.Discoverer, apiBase, authBase string, allowLoopback, requireMetadata bool) (*auth.AuthServerMetadata, error) {
-	// Try the protected-resource doc to learn the AS, then its metadata.
-	if pr, err := disc.ProtectedResource(ctx, apiBase); err == nil && len(pr.AuthorizationServers) > 0 {
-		cand := strings.TrimRight(pr.AuthorizationServers[0], "/")
-		if serr := validateAuthServerURL(cand, allowLoopback); serr != nil {
-			return nil, serr
+func discoverAuthServer(ctx context.Context, disc auth.Discoverer, resource, authBase string, allowLoopback, requireMetadata bool) (*auth.AuthServerMetadata, error) {
+	// Try the resource's protected-resource doc to learn the AS, then its metadata.
+	if pr, err := disc.ProtectedResource(ctx, resource); err == nil {
+		if !pr.Describes(resource) {
+			return nil, output.New(output.ExitValidation,
+				fmt.Sprintf("the protected-resource document names its resource as %s, not %s, the resource this login is for", strconv.QuoteToASCII(pr.Resource), resource),
+				"The document describes another resource, so the login doesn't use it (RFC 9728). "+
+					"Verify the profile's api_base (`givmo config view`) and the Connect deployment.")
 		}
-		authBase = cand
+		if len(pr.AuthorizationServers) > 0 {
+			authBase = pr.AuthorizationServers[0]
+		}
+	}
+	authBase = strings.TrimRight(authBase, "/")
+	if serr := validateAuthServerURL(authBase, allowLoopback); serr != nil {
+		return nil, serr
 	}
 	md, err := disc.AuthServer(ctx, authBase)
 	if err == nil && (md.AuthorizationEndpoint == "" || md.TokenEndpoint == "") {
@@ -304,13 +366,8 @@ func discoverAuthServer(ctx context.Context, disc auth.Discoverer, apiBase, auth
 			"could not read the Givmo authorization server's metadata: "+err.Error(),
 			"Check connectivity and the active profile's api_base (`givmo config view`), then re-run `givmo login`.")
 	}
-	// Fallback to conventional Connect endpoints under the (already-validated or
-	// profile-supplied) auth base.
-	base := strings.TrimRight(authBase, "/")
-	if serr := validateAuthServerURL(base, allowLoopback); serr != nil {
-		return nil, serr
-	}
-	return fallbackAuthServerMetadata(base), nil
+	// Fallback to conventional Connect endpoints under the auth base, checked above.
+	return fallbackAuthServerMetadata(authBase), nil
 }
 
 // clientEnv is what the environment says about the OAuth client: GIVMO_CLIENT_ID,
@@ -398,36 +455,27 @@ func fallbackAuthServerMetadata(base string) *auth.AuthServerMetadata {
 	}
 }
 
-// validateAuthServerURL enforces https on an authorization-server URL, allowing
-// http only for loopback hosts and only when allowLoopback is set. Pure →
-// unit-tested.
+// validateAuthServerURL applies auth.CheckAddress, the rules an
+// authorization-server address meets at login and again whenever a stored
+// sign-in is loaded, and answers a refusal in login's envelope, exit 7: https
+// with an ASCII host, http only for a loopback host and only when allowLoopback
+// is set. Pure → unit-tested.
 func validateAuthServerURL(raw string, allowLoopback bool) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	switch err := auth.CheckAddress(raw, allowLoopback); {
+	case err == nil:
+		return nil
+	case errors.Is(err, auth.ErrNotURL):
 		return output.New(output.ExitValidation,
 			"discovered authorization server URL is not a valid URL: "+raw,
 			"The auth-server metadata is malformed; verify the profile's auth_base and the Connect deployment.")
-	}
-	if u.Scheme == "https" {
-		return nil
-	}
-	if u.Scheme == "http" && allowLoopback && isLoopbackHost(u.Hostname()) {
-		return nil
+	case errors.Is(err, auth.ErrHostNotASCII):
+		return output.New(output.ExitValidation,
+			"refusing an authorization server URL that spells its host with characters outside ASCII: "+strconv.QuoteToASCII(raw),
+			"Givmo's addresses are written in ASCII; a host with other characters can pass for a different one. "+
+				"Verify the profile's api_base and auth_base (`givmo config view`) and the Connect deployment.")
 	}
 	return output.New(output.ExitValidation,
 		"refusing a non-https authorization server URL: "+raw,
 		"The discovered auth server must use https (loopback http is allowed only on the sandbox/dev profile). "+
 			"This guards against a spoofed protected-resource document redirecting login to a plaintext or attacker origin.")
-}
-
-// isLoopbackHost reports whether host is a loopback address/name.
-func isLoopbackHost(host string) bool {
-	switch strings.ToLower(host) {
-	case "localhost", "127.0.0.1", "::1", "[::1]":
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
 }

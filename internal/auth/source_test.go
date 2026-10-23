@@ -6,14 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -228,7 +226,7 @@ func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 	// whose GIVMO_HOME differs (a shell that exports it, an IDE that does not) reads
 	// and renews the same sign-in, so it must wait for the same lock.
 	t.Run("two GIVMO_HOME values sharing one keychain sign-in renew it once", func(t *testing.T) {
-		storingFakeKeychain(t)
+		trapped := storingFakeKeychain(t)
 		f, srv := newFakeTokenServer(t, "test-refresh-0")
 		f.holdFirst()
 		t.Setenv("GIVMO_HOME", t.TempDir())
@@ -239,6 +237,11 @@ func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 			t.Fatalf("backends %s and %s, want keychain", storeA.Backend(), storeB.Backend())
 		}
 		saveSignIn(t, storeA, signIn(srv.URL, 10*time.Second, time.Hour))
+		// The other process reads it back through the keychain tool, never through a
+		// security on PATH, before the race begins.
+		if _, err := storeB.Load("sandbox"); err != nil || trapped() {
+			t.Fatalf("the sign-in doesn't read back through the keychain tool (Load: %v; the PATH trap ran: %v)", err, trapped())
+		}
 		a := NewTokenSource(storeA, "sandbox", srv.Client(), nil)
 		b := NewTokenSource(storeB, "sandbox", srv.Client(), nil)
 
@@ -258,34 +261,29 @@ func TestTokenSource_RenewsOnceAcrossProcesses(t *testing.T) {
 		if err != nil || stored.RefreshToken != "test-refresh-1" {
 			t.Errorf("stored sign-in = %v (%v), want the successor test-refresh-1", stored, err)
 		}
+		if trapped() {
+			t.Error("the store ran the security found on PATH; it must run its keychain tool by path alone")
+		}
 	})
 }
 
-// storingFakeKeychain stands in for macOS `security` and the user's keychain: a
-// shell script, the only program on PATH, that stores each item as a file under a
-// temporary directory (reading `security -i`'s hex line, answering find and delete).
-// It touches no keychain. HOME is a temporary directory too, so nothing the store
-// keeps per user reaches the real one.
-func storingFakeKeychain(t *testing.T) {
+// storingFakeKeychain stands in for macOS's keychain tool and the user's keychain:
+// a shell script, run in place of /usr/bin/security, that stores each item as a
+// file under a temporary directory (reading `security -i`'s hex line, answering
+// find and delete). It touches no keychain. HOME is a temporary directory too, so
+// nothing the store keeps per user reaches the real one. It returns whether the
+// trap useFakeSecurity puts on PATH ran, which it never may.
+func storingFakeKeychain(t *testing.T) (trapped func() bool) {
 	t.Helper()
-	if runtime.GOOS != "darwin" {
-		t.Skip("the keychain backend runs only on macOS")
-	}
+	trapped = useFakeSecurity(t, storingFakeSecurity)
 	if _, err := os.Stat("/usr/bin/xxd"); err != nil {
 		t.Skip("the fake keychain decodes its hex with /usr/bin/xxd")
 	}
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "security"), []byte(storingFakeSecurity), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
 	t.Setenv("FAKE_KEYCHAIN_DIR", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GIVMO_TOKEN_BACKEND", "")
 	t.Setenv("GIVMO_CLIENT_SECRET", "")
-	if path, err := exec.LookPath("security"); err != nil || path != filepath.Join(bin, "security") {
-		t.Fatalf("security resolves to %q (%v), not the fake", path, err)
-	}
+	return trapped
 }
 
 const storingFakeSecurity = `#!/bin/sh
@@ -597,6 +595,193 @@ func TestTokenSource_SaysWhenTheSignInEnds(t *testing.T) {
 			}
 			if strings.Count(notices.String(), "\n") > 1 {
 				t.Errorf("the reminder was printed more than once")
+			}
+		})
+	}
+}
+
+// answeringTransport answers every request itself, as a token endpoint renewing
+// a sign-in would, and records where each was going, so a test can say whether
+// any request left at all.
+type answeringTransport struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (a *answeringTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	a.mu.Lock()
+	a.sent = append(a.sent, r.URL.String())
+	a.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"access_token":"test-access-1","token_type":"Bearer","refresh_token":"test-refresh-1","expires_in":1800}`)),
+		Request:    r,
+	}, nil
+}
+
+func (a *answeringTransport) requests() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.sent...)
+}
+
+// TestTokenSource_RefusesAStoredSignInTheRulesRefuse: each time a sign-in is
+// loaded, the addresses its login adopted are checked again with the rules a
+// login applies (CheckAddress). A sign-in that fails them is not used: no access
+// token is handed out, and no request leaves for any of its addresses, its
+// refresh token least of all. It stays stored, so a re-login or a logout can say
+// it was not ended on Givmo's side. Each sign-in here is due for renewal, so one
+// that is used is renewed through its token endpoint at once, except a fresh one,
+// whose access token is refused even though no renewal would send anything.
+func TestTokenSource_RefusesAStoredSignInTheRulesRefuse(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		profile   string
+		fresh     bool // its access token is an hour from expiry, so not due
+		edit      func(c *Credential)
+		wantField string // the refused address; "" when the sign-in is used
+		wantErr   error
+	}{
+		{name: "an http token endpoint off this computer", profile: "sandbox",
+			edit:      func(c *Credential) { c.TokenEndpoint = "http://token.example.test/token" },
+			wantField: "token endpoint", wantErr: ErrNotHTTPS},
+		{name: "a loopback http token endpoint under the production profile", profile: "production",
+			edit:      func(c *Credential) { c.TokenEndpoint = "http://127.0.0.1:9/token" },
+			wantField: "token endpoint", wantErr: ErrNotHTTPS},
+		{name: "a revocation endpoint whose host isn't ASCII", profile: "sandbox",
+			edit:      func(c *Credential) { c.RevocationEndpoint = "https://ｍｃｐ.example.test/connect/oauth/revoke" },
+			wantField: "revocation endpoint", wantErr: ErrHostNotASCII},
+		{name: "an authorization server whose host is percent-encoded non-ASCII", profile: "sandbox",
+			edit:      func(c *Credential) { c.Issuer = "https://%EF%BD%8D%EF%BD%83%EF%BD%90.example.test" },
+			wantField: "authorization server", wantErr: ErrHostNotASCII},
+		{name: "an authorization server that isn't https", profile: "sandbox",
+			edit:      func(c *Credential) { c.Issuer = "http://mcp.example.test" },
+			wantField: "authorization server", wantErr: ErrNotHTTPS},
+		{name: "a fresh access token from a sign-in whose token endpoint isn't https", profile: "sandbox", fresh: true,
+			edit:      func(c *Credential) { c.TokenEndpoint = "http://token.example.test/token" },
+			wantField: "token endpoint", wantErr: ErrNotHTTPS},
+		{name: "https throughout, under the production profile", profile: "production", edit: func(*Credential) {}},
+		{name: "a loopback http token endpoint on the sandbox profile", profile: "sandbox",
+			edit: func(c *Credential) { c.TokenEndpoint = "http://127.0.0.1:9/token" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newSourceStore(t)
+			expiresIn := 10 * time.Second
+			if tc.fresh {
+				expiresIn = time.Hour
+			}
+			c := signIn("https://mcp.example.test/connect/oauth/token", expiresIn, time.Hour)
+			c.Profile = tc.profile
+			tc.edit(c)
+			saveSignIn(t, store, c)
+			transport := &answeringTransport{}
+			src := NewTokenSource(store, tc.profile, &http.Client{Transport: transport}, nil)
+
+			got, err := src.Credential(context.Background())
+			if tc.wantField == "" {
+				if err != nil || got == nil || got.AccessToken != "test-access-1" {
+					t.Fatalf("Credential = %+v, %v; want the sign-in, renewed", got, err)
+				}
+				if sent := transport.requests(); len(sent) != 1 || sent[0] != c.TokenEndpoint {
+					t.Errorf("requests = %q, want one renewal at %s", sent, c.TokenEndpoint)
+				}
+				return
+			}
+			_, rejectedErr := src.Rejected(context.Background(), c.AuthorizationHeader())
+			for name, err := range map[string]error{"Credential": err, "Rejected": rejectedErr} {
+				var ae *StoredAddressError
+				if !errors.As(err, &ae) || ae.Field != tc.wantField || !errors.Is(err, tc.wantErr) {
+					t.Errorf("%s error = %v, want its %s refused (%v)", name, err, tc.wantField, tc.wantErr)
+				}
+			}
+			if got != nil {
+				t.Errorf("Credential handed out %+v", got)
+			}
+			if sent := transport.requests(); len(sent) != 0 {
+				t.Errorf("requests %q left; a sign-in the rules refuse sends nothing", sent)
+			}
+			if stored, err := store.Load(tc.profile); err != nil || stored.RefreshToken != "test-refresh-0" {
+				t.Errorf("stored sign-in = %+v, %v; want it kept as it was", stored, err)
+			}
+		})
+	}
+}
+
+// TestTokenSource_ReplaceLeavesThePreviousSignInLiveWhereTheNewOneCantRenew: the
+// Givmo authorization server ends a grant with every live access token the
+// person holds for the client, so ending the sign-in a login replaced ends the
+// new sign-in's access token too. Where this computer renews the new one, that
+// costs one renewal: it is stored due, and end is told to end the previous one.
+// Where it can't, on a platform with no file lock (fileLocking set false stands
+// in for one) or for a sign-in with no refresh token, the previous one is left
+// live: end gets ErrCannotRenewHere, and the new access token is stored as it
+// came. An API key is none of the client's access tokens, so it still has the
+// previous sign-in ended where nothing renews, and a previous API key is no
+// sign-in to leave live.
+func TestTokenSource_ReplaceLeavesThePreviousSignInLiveWhereTheNewOneCantRenew(t *testing.T) {
+	const tokenEndpoint = "https://mcp.example.test/connect/oauth/token"
+	previous := func() *Credential { return signIn(tokenEndpoint, time.Hour, 24*time.Hour) }
+	renewable := func() *Credential {
+		c := signIn(tokenEndpoint, time.Hour, 0)
+		c.AccessToken, c.RefreshToken = "test-access-1", "test-refresh-1"
+		return c
+	}
+	noRefresh := func() *Credential {
+		c := renewable()
+		c.RefreshToken = ""
+		return c
+	}
+	apiKey := func(key string) *Credential {
+		return &Credential{Profile: "sandbox", Type: CredTypeAPIKey, AccessToken: key, TokenType: "Bearer"}
+	}
+	for _, tc := range []struct {
+		name         string
+		noFileLock   bool
+		previous     *Credential
+		next         *Credential
+		wantLeftLive error // nil: end is told to end the previous one
+		wantDue      bool
+	}{
+		{name: "a sign-in this computer renews", previous: previous(), next: renewable(), wantDue: true},
+		{name: "a sign-in on a platform with no file lock", noFileLock: true, previous: previous(), next: renewable(),
+			wantLeftLive: ErrCannotRenewHere},
+		{name: "a sign-in with no refresh token", previous: previous(), next: noRefresh(), wantLeftLive: ErrCannotRenewHere},
+		{name: "an API key on a platform with no file lock", noFileLock: true, previous: previous(), next: apiKey("test-api-key")},
+		{name: "a sign-in replacing an API key on a platform with no file lock", noFileLock: true,
+			previous: apiKey("test-api-key-old"), next: renewable()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noFileLock {
+				prev := fileLocking
+				fileLocking = false
+				t.Cleanup(func() { fileLocking = prev })
+			}
+			store := newSourceStore(t)
+			saveSignIn(t, store, tc.previous)
+			src := NewTokenSource(store, "sandbox", &http.Client{Transport: &answeringTransport{}}, nil)
+
+			var handed []*Credential
+			var told []error
+			err := src.Replace(context.Background(), tc.next, func(previous *Credential, leftLive error) {
+				handed = append(handed, previous)
+				told = append(told, leftLive)
+			})
+			if err != nil {
+				t.Fatalf("Replace: %v", err)
+			}
+			if len(handed) != 1 || handed[0].AccessToken != tc.previous.AccessToken {
+				t.Fatalf("end got %v, want the previous credential, once", handed)
+			}
+			if !errors.Is(told[0], tc.wantLeftLive) {
+				t.Errorf("end was told %v, want %v", told[0], tc.wantLeftLive)
+			}
+			stored, err := store.Load("sandbox")
+			if err != nil || stored.AccessToken != tc.next.AccessToken {
+				t.Fatalf("stored = %+v, %v; want the new credential", stored, err)
+			}
+			if due := stored.expiresWithin(RenewWindow); due != tc.wantDue {
+				t.Errorf("the new credential stored due for renewal: %v, want %v", due, tc.wantDue)
 			}
 		})
 	}

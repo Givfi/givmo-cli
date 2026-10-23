@@ -137,15 +137,19 @@ func (m mcpAuthorizer) Rejected(ctx context.Context, header string) (string, err
 }
 
 // renewalError maps a token source failure to the CLI's envelope: an ended
-// sign-in, a client the environment no longer accepts and another refusal exit 3;
-// a rate limit 5; a server that could not be reached or did not answer 6; a wait
-// for another process's renewal that ended unfinished 1, with a retry.
+// sign-in, a stored sign-in carrying an address the CLI's rules refuse, a client
+// the environment no longer accepts and another refusal exit 3; a rate limit 5; a
+// server that could not be reached or did not answer 6; a wait for another
+// process's renewal that ended unfinished 1, with a retry.
 func renewalError(err error) error {
 	var te *auth.TokenError
 	var tr *auth.TransportError
+	var ae *auth.StoredAddressError
 	switch {
 	case errors.Is(err, auth.ErrSignInEnded):
 		return output.New(output.ExitAuth, "Your Givmo sign-in on this computer has ended.", "Run `givmo login`.")
+	case errors.As(err, &ae):
+		return output.New(output.ExitAuth, "the stored sign-in can't be used: "+ae.Error(), "Run `givmo login` to sign in again.")
 	case errors.Is(err, auth.ErrLockTimeout), errors.Is(err, auth.ErrLockWaitCanceled):
 		return output.New(output.ExitGeneric, err.Error(), "Retry.")
 	case errors.As(err, &te) && (te.Code == "invalid_client" || te.Code == "unauthorized_client"):
