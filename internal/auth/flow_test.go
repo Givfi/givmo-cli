@@ -334,7 +334,8 @@ func TestLoopbackListener_ChecksIss(t *testing.T) {
 // TestProtectedResourceMetadata_DescribesTheSameResourceOnly pins which
 // spellings of a resource a protected-resource document may use (RFC 9728
 // section 3.3): the ones the Givmo authorization server reads as the same
-// resource, and never another scheme, host, port or path.
+// resource, but for the few it forgives that no one writes (Describes), and
+// never another scheme, host, port or path.
 func TestProtectedResourceMetadata_DescribesTheSameResourceOnly(t *testing.T) {
 	const resource = "https://mcp.givmo.io/mcp"
 	for _, tc := range []struct {

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -339,6 +340,9 @@ type fakeGivmo struct {
 	cimd    bool
 	mu      sync.Mutex
 	tokenRq []*http.Request
+	// noRefresh leaves the refresh token out of the code exchange's answer, so
+	// the sign-in can't be renewed. Set under mu.
+	noRefresh bool
 }
 
 func newFakeGivmo(t *testing.T, cimd bool) *fakeGivmo {
@@ -373,10 +377,15 @@ func newFakeGivmo(t *testing.T, cimd bool) *fakeGivmo {
 		_ = r.ParseForm()
 		g.mu.Lock()
 		g.tokenRq = append(g.tokenRq, r.Clone(context.Background()))
+		noRefresh := g.noRefresh
 		g.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if r.PostForm.Get("grant_type") == "refresh_token" {
 			io.WriteString(w, `{"access_token":"test-access-2","token_type":"Bearer","refresh_token":"test-refresh-2","expires_in":1800}`)
+			return
+		}
+		if noRefresh {
+			io.WriteString(w, `{"access_token":"test-access-1","token_type":"Bearer","expires_in":1800,"scope":"givmo.donations.read givmo.receipts.read givmo.giving_summary.read givmo.donation_intents.create"}`)
 			return
 		}
 		io.WriteString(w, `{"access_token":"test-access-1","token_type":"Bearer","refresh_token":"test-refresh-1","expires_in":1800,"scope":"givmo.donations.read givmo.receipts.read givmo.giving_summary.read givmo.donation_intents.create"}`)
@@ -560,6 +569,18 @@ func TestLoginInteractive_SignsInWithGivmosClientDocument(t *testing.T) {
 	}
 }
 
+// previousSignIn is a sandbox sign-in stored before a login, as a public client
+// of another Givmo host, ending at revocation.
+func previousSignIn(revocation string) *auth.Credential {
+	return &auth.Credential{
+		Profile: config.ProfileSandbox, Type: auth.CredTypeOAuth, AccessToken: "test-access-old",
+		RefreshToken: "test-refresh-old", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
+		ClientID: "https://mcp.example.test/connect/oauth/clients/givmo-cli", Issuer: "https://mcp.example.test",
+		TokenEndpoint: "https://mcp.example.test/connect/oauth/token", RevocationEndpoint: revocation,
+		AuthMethod: auth.AuthMethodNone, GrantedAt: time.Now().Add(-24 * time.Hour),
+	}
+}
+
 // TestLoginInteractive_EndsThePreviousSignIn: a login on a profile that already
 // holds a sign-in stores the new one first, then asks Givmo to end the previous
 // one as logout does (its refresh token, RFC 7009), and says what Givmo answered.
@@ -567,17 +588,10 @@ func TestLoginInteractive_SignsInWithGivmosClientDocument(t *testing.T) {
 // a grant together with every live access token the person holds for the
 // client, the new sign-in's among them, so after replacing a sign-in the new
 // access token is renewed before its first use. A login with an API key replaces
-// a sign-in the same way.
+// a sign-in the same way. A new sign-in this computer can't renew leaves the
+// previous one live, since ending it would end the new one's access token too,
+// and the login says so.
 func TestLoginInteractive_EndsThePreviousSignIn(t *testing.T) {
-	previousSignIn := func(revocation string) *auth.Credential {
-		return &auth.Credential{
-			Profile: config.ProfileSandbox, Type: auth.CredTypeOAuth, AccessToken: "test-access-old",
-			RefreshToken: "test-refresh-old", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
-			ClientID: "https://mcp.example.test/connect/oauth/clients/givmo-cli", Issuer: "https://mcp.example.test",
-			TokenEndpoint: "https://mcp.example.test/connect/oauth/token", RevocationEndpoint: revocation,
-			AuthMethod: auth.AuthMethodNone, GrantedAt: time.Now().Add(-24 * time.Hour),
-		}
-	}
 	const notOffered = "this Givmo environment doesn't let the CLI end its sign-in yet"
 	for _, tc := range []struct {
 		name string
@@ -587,6 +601,7 @@ func TestLoginInteractive_EndsThePreviousSignIn(t *testing.T) {
 		status       int
 		body         string
 		apiKey       bool // log in with an API key instead of the browser
+		noRefresh    bool // Givmo's code exchange answers with no refresh token
 		human        bool // read the text instead of the JSON
 		wantRevokes  int
 		wantRevoked  bool
@@ -638,9 +653,15 @@ func TestLoginInteractive_EndsThePreviousSignIn(t *testing.T) {
 		{name: "an API-key login replacing a sign-in", apiKey: true,
 			previous: func(revoke, _ string) *auth.Credential { return previousSignIn(revoke) },
 			status:   http.StatusOK, body: `{}`, wantRevokes: 1, wantRevoked: true, wantInUseNow: "test-api-key"},
+		{name: "a new sign-in this computer can't renew", noRefresh: true,
+			previous:  func(revoke, _ string) *auth.Credential { return previousSignIn(revoke) },
+			wantError: auth.ErrCannotRenewHere.Error(), wantInUseNow: "test-access-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newFakeGivmo(t, true)
+			g.mu.Lock()
+			g.noRefresh = tc.noRefresh
+			g.mu.Unlock()
 			t.Setenv("GIVMO_HOME", t.TempDir())
 			t.Setenv("GIVMO_TOKEN_BACKEND", "file")
 			t.Setenv("GIVMO_CLIENT_ID", "")
@@ -772,4 +793,83 @@ func TestLoginInteractive_EndsThePreviousSignIn(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoginInteractive_KeepsThePreviousSignInWhenTheStoreFails: a login whose new
+// sign-in can't be stored ends nothing on Givmo's side, so the sign-in it would
+// have replaced still works. That is why the new sign-in is stored first. The
+// store fails for real: the credentials directory is read-only by the time the
+// login stores.
+func TestLoginInteractive_KeepsThePreviousSignInWhenTheStoreFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory doesn't refuse new files on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	g := newFakeGivmo(t, true)
+	home := t.TempDir()
+	t.Setenv("GIVMO_HOME", home)
+	t.Setenv("GIVMO_TOKEN_BACKEND", "file")
+	t.Setenv("GIVMO_CLIENT_ID", "")
+	t.Setenv("GIVMO_CLIENT_SECRET", "")
+	t.Setenv("GIVMO_API_KEY", "")
+	store, err := auth.NewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	revokes := 0
+	revSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		revokes++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{}`)
+	}))
+	defer revSrv.Close()
+	if err := store.Save(previousSignIn(revSrv.URL + "/revoke")); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.Load(config.ProfileSandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials := filepath.Join(home, "credentials")
+	if err := os.Chmod(credentials, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(credentials, 0o700) })
+
+	app := &appCtx{
+		Profile: config.Profile{Name: config.ProfileSandbox, Endpoints: config.Endpoints{APIBase: g.srv.URL, AuthBase: g.srv.URL}},
+		Config:  &config.Config{},
+		Printer: output.NewPrinter(io.Discard, io.Discard, true),
+		Store:   store,
+	}
+	_, _, err = signInThroughTheBrowser(t, g, app)
+	if oe := output.AsError(err); err == nil || oe.Code != output.ExitGeneric || !strings.HasPrefix(oe.Message, "authenticated, but could not store the token") {
+		t.Fatalf("login = %v; want exit 1, authenticated, but could not store the token", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if revokes != 0 {
+		t.Errorf("%d revocation requests after a failed store, want none: the previous sign-in must keep working", revokes)
+	}
+	stored, err := store.Load(config.ProfileSandbox)
+	if err != nil {
+		t.Fatalf("the previous sign-in is no longer stored: %v", err)
+	}
+	if got, want := mustJSON(t, stored), mustJSON(t, saved); got != want {
+		t.Errorf("stored = %s, want the previous sign-in untouched: %s", got, want)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

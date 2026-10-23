@@ -107,10 +107,16 @@ func loginWithAPIKey(app *appCtx, key string) error {
 // replaceSignIn stores cred as the profile's credential and then asks Givmo to
 // end the sign-in it replaced, as logout does (endOnGivmo), returning what Givmo
 // said. That request gets its own time (revokeTimeout), whatever the wait for the
-// browser left of the login's.
+// browser left of the login's. Where this computer can't renew cred, the sign-in
+// it replaced is left live, and the reason is returned instead
+// (auth.ErrCannotRenewHere).
 func replaceSignIn(ctx context.Context, app *appCtx, cred *auth.Credential) (givmoSide, error) {
 	var previous givmoSide
-	err := app.tokens().Replace(ctx, cred, func(old *auth.Credential) {
+	err := app.tokens().Replace(ctx, cred, func(old *auth.Credential, leftLive error) {
+		if leftLive != nil {
+			previous = givmoSide{asked: true, reason: leftLive.Error()}
+			return
+		}
 		previous = endOnGivmo(context.WithoutCancel(ctx), app, old)
 	})
 	return previous, err

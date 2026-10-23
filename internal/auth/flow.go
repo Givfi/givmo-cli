@@ -41,9 +41,8 @@ type ProtectedResourceMetadata struct {
 // must be identical to the identifier the document was fetched for.
 //
 // Identical is read as the Givmo authorization server reads a resource
-// parameter (resource_indicators._canonical), so the login never refuses a
-// spelling of its resource that the server would take, and exactly these
-// spellings are one:
+// parameter (resource_indicators._canonical), and exactly these spellings are
+// one:
 //   - the scheme, and the host, in upper or lower case;
 //   - the scheme's default port written out (:443 for https, :80 for http), and
 //     no port;
@@ -52,9 +51,16 @@ type ProtectedResourceMetadata struct {
 // Nothing else is one. Two different schemes, hosts, ports or paths never are,
 // so a document for any other resource never matches. An identifier with a
 // query, a fragment or a user part, or a scheme other than https or http,
-// identifies no resource and matches nothing. The server's reading also
-// forgives white space around a parameter; a document's resource gets no such
-// allowance.
+// identifies no resource and matches nothing.
+//
+// The server's reading also forgives a few spellings no one writes, which a
+// document's resource doesn't get here: white space around the identifier or a
+// tab or line break inside it, a default port written with leading zeros
+// (:0443), and an empty user part (@) or query (?). So for any identifier
+// written as a URI, the login never takes a resource the server wouldn't. A
+// character a URI can't carry as written (a space, a quote) is the exception:
+// Go's URL parser reads it as its percent-encoding (%20, %22), which the server
+// keeps apart from it. No Givmo resource's path has one.
 func (m *ProtectedResourceMetadata) Describes(resource string) bool {
 	a, ok := canonicalResource(m.Resource)
 	b, okToo := canonicalResource(resource)

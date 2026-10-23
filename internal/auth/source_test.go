@@ -707,3 +707,82 @@ func TestTokenSource_RefusesAStoredSignInTheRulesRefuse(t *testing.T) {
 		})
 	}
 }
+
+// TestTokenSource_ReplaceLeavesThePreviousSignInLiveWhereTheNewOneCantRenew: the
+// Givmo authorization server ends a grant with every live access token the
+// person holds for the client, so ending the sign-in a login replaced ends the
+// new sign-in's access token too. Where this computer renews the new one, that
+// costs one renewal: it is stored due, and end is told to end the previous one.
+// Where it can't, on a platform with no file lock (fileLocking set false stands
+// in for one) or for a sign-in with no refresh token, the previous one is left
+// live: end gets ErrCannotRenewHere, and the new access token is stored as it
+// came. An API key is none of the client's access tokens, so it still has the
+// previous sign-in ended where nothing renews, and a previous API key is no
+// sign-in to leave live.
+func TestTokenSource_ReplaceLeavesThePreviousSignInLiveWhereTheNewOneCantRenew(t *testing.T) {
+	const tokenEndpoint = "https://mcp.example.test/connect/oauth/token"
+	previous := func() *Credential { return signIn(tokenEndpoint, time.Hour, 24*time.Hour) }
+	renewable := func() *Credential {
+		c := signIn(tokenEndpoint, time.Hour, 0)
+		c.AccessToken, c.RefreshToken = "test-access-1", "test-refresh-1"
+		return c
+	}
+	noRefresh := func() *Credential {
+		c := renewable()
+		c.RefreshToken = ""
+		return c
+	}
+	apiKey := func(key string) *Credential {
+		return &Credential{Profile: "sandbox", Type: CredTypeAPIKey, AccessToken: key, TokenType: "Bearer"}
+	}
+	for _, tc := range []struct {
+		name         string
+		noFileLock   bool
+		previous     *Credential
+		next         *Credential
+		wantLeftLive error // nil: end is told to end the previous one
+		wantDue      bool
+	}{
+		{name: "a sign-in this computer renews", previous: previous(), next: renewable(), wantDue: true},
+		{name: "a sign-in on a platform with no file lock", noFileLock: true, previous: previous(), next: renewable(),
+			wantLeftLive: ErrCannotRenewHere},
+		{name: "a sign-in with no refresh token", previous: previous(), next: noRefresh(), wantLeftLive: ErrCannotRenewHere},
+		{name: "an API key on a platform with no file lock", noFileLock: true, previous: previous(), next: apiKey("test-api-key")},
+		{name: "a sign-in replacing an API key on a platform with no file lock", noFileLock: true,
+			previous: apiKey("test-api-key-old"), next: renewable()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noFileLock {
+				prev := fileLocking
+				fileLocking = false
+				t.Cleanup(func() { fileLocking = prev })
+			}
+			store := newSourceStore(t)
+			saveSignIn(t, store, tc.previous)
+			src := NewTokenSource(store, "sandbox", &http.Client{Transport: &answeringTransport{}}, nil)
+
+			var handed []*Credential
+			var told []error
+			err := src.Replace(context.Background(), tc.next, func(previous *Credential, leftLive error) {
+				handed = append(handed, previous)
+				told = append(told, leftLive)
+			})
+			if err != nil {
+				t.Fatalf("Replace: %v", err)
+			}
+			if len(handed) != 1 || handed[0].AccessToken != tc.previous.AccessToken {
+				t.Fatalf("end got %v, want the previous credential, once", handed)
+			}
+			if !errors.Is(told[0], tc.wantLeftLive) {
+				t.Errorf("end was told %v, want %v", told[0], tc.wantLeftLive)
+			}
+			stored, err := store.Load("sandbox")
+			if err != nil || stored.AccessToken != tc.next.AccessToken {
+				t.Fatalf("stored = %+v, %v; want the new credential", stored, err)
+			}
+			if due := stored.expiresWithin(RenewWindow); due != tc.wantDue {
+				t.Errorf("the new credential stored due for renewal: %v, want %v", due, tc.wantDue)
+			}
+		})
+	}
+}
